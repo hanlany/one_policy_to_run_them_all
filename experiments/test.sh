@@ -1,4 +1,4 @@
-python experiment.py \
+python3 experiment.py \
     --algorithm.name=uni_ppo.ppo \
     --environment.name="multi_robot" \
     --runner.track_console=True \

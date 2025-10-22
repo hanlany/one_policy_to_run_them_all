@@ -13,7 +13,7 @@
 
 conda activate one_policy_to_run_them_all
 
-python experiment.py \
+python3 experiment.py \
     --algorithm.name="uni_ppo.ppo" \
     --algorithm.total_timesteps=1600143360 \
     --algorithm.nr_steps=10880 \

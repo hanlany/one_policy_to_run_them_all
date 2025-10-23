@@ -17,7 +17,7 @@ setup(
     name="one_policy_to_run_them_all",
     description="one_policy_to_run_them_all",
     long_description=long_description,
-    url="https://github.com/hanlany/one_policy_to_run_them_all.git",
+    url="https://github.com/nico-bohlinger/one_policy_to_run_them_all",
     author="Nico Bohlinger",
     author_email="nico.bohlinger@gmail.com",
     version="0.0.1",

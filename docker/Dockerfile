@@ -20,7 +20,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-RUN git clone https://github.com/nico-bohlinger/RL-X.git
+RUN git clone https://github.com/hanlany/RL-X.git
 WORKDIR /app/RL-X
 # RUN git checkout 70e220ac7eaf7b14ff4e0660227185a4628791b4
 RUN python3 -m pip install pip -U

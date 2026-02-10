@@ -38,7 +38,4 @@ RUN git clone https://github.com/hanlany/one_policy_to_run_them_all.git
 WORKDIR /app/one_policy_to_run_them_all
 RUN uv pip install -e .[all] --system
 
-# Make shell script executable
-RUN chmod +x ./experiments/experiment.sh ./experiments/test.sh
-
 CMD ["bash"]

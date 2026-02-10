@@ -1,4 +1,5 @@
 touch bash_history
+xhost +local:docker
 docker run -it \
     -e DISPLAY=$DISPLAY \
     -e XAUTHORITY=/tmp/.Xauthority \
@@ -8,6 +9,7 @@ docker run -it \
     --network=host \
     --gpus all \
     -v ./../one_policy_to_run_them_all:/app/one_policy_to_run_them_all \
+    -v ./../RL-X:/app/RL-X \
     lavaurma \
     bash
 

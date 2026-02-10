@@ -12,3 +12,5 @@ experiments/*.sh
 !experiments/experiment.sh
 !experiments/test.sh
 bash_history
+*.pth
+*.npz

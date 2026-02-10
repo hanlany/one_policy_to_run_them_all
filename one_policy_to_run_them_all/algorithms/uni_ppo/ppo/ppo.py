@@ -13,6 +13,14 @@ from flax.training import orbax_utils
 import orbax.checkpoint
 import optax
 import wandb
+import torch
+import torch.nn as nn
+import sys
+sys.path.append("/app/one_policy_to_run_them_all/student")
+try:
+    from train_student import StudentPolicy
+except ImportError:
+    print("Could not import StudentPolicy. Make sure train_student.py is in the path.")
 
 from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.general_properties import GeneralProperties
 from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.policy import get_policy
@@ -54,7 +62,11 @@ class PPO:
         self.evaluation_frequency = config.algorithm.evaluation_frequency
         self.evaluation_episodes = config.algorithm.evaluation_episodes
         self.save_latest_frequency = config.algorithm.save_latest_frequency
+        self.save_data = config.algorithm.save_data
+        self.data_points = config.algorithm.data_points
+        self.dagger_style = config.algorithm.dagger_style
         self.determine_fastest_cpu_for_gpu = config.algorithm.determine_fastest_cpu_for_gpu
+        self.use_student = config.algorithm.use_student
         self.multi_render = config.environment.multi_render
         self.batch_size = config.environment.nr_envs * config.algorithm.nr_steps
         self.nr_updates = config.algorithm.total_timesteps // self.batch_size
@@ -744,15 +756,36 @@ class PPO:
 
         check_point_handler = orbax.checkpoint.PyTreeCheckpointHandler(aggregate_filename=checkpoint_file_name)
         checkpointer = orbax.checkpoint.Checkpointer(check_point_handler)
+        
+        # Mask out keys "save_data" and "data_points" in config.algorithm.to_dict()
+        algorithm_dict = config.algorithm.to_dict()
+        if "save_data" in algorithm_dict:
+            del algorithm_dict["save_data"]
+        if "data_points" in algorithm_dict:
+            del algorithm_dict["data_points"]
+        if "use_student" in algorithm_dict:
+            del algorithm_dict["use_student"]
+        if "dagger_style" in algorithm_dict:
+            del algorithm_dict["dagger_style"]
 
-        loaded_algorithm_config = checkpointer.restore(checkpoint_dir)["config_algorithm"]
+        # Restore only the configuration to check for missing keys
+        restored_struct = checkpointer.restore(checkpoint_dir, item={"config_algorithm": algorithm_dict})
+        loaded_algorithm_config = restored_struct['config_algorithm']
+
         for key, value in loaded_algorithm_config.items():
             if f"algorithm.{key}" not in explicitly_set_algorithm_params:
                 config.algorithm[key] = value
+        
+        # # Add missing keys for backward compatibility
+        # if "save_data" not in config.algorithm:
+        #     config.algorithm.save_data = False
+        # if "data_points" not in config.algorithm:
+        #     config.algorithm.data_points = 0
+
         model = PPO(config, env, run_path, writer)
 
         target = {
-            "config_algorithm": config.algorithm.to_dict(),
+            "config_algorithm": algorithm_dict,
             "policy": model.policy_state,
             "critic": model.critic_state
         }
@@ -760,11 +793,14 @@ class PPO:
 
         model.policy_state = checkpoint["policy"]
         model.critic_state = checkpoint["critic"]
+        
+        # import pdb; pdb.set_trace()
 
         return model
     
 
     def test(self, episodes):
+        import pdb;
         @jax.jit
         def get_action(policy_state, state):
             @partial(jax.jit, static_argnums=(1,2))
@@ -817,18 +853,129 @@ class PPO:
         
         
         self.set_eval_mode()
+
+        def get_student_action(policy_state, state):
+            pass
+
+        if self.use_student:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            input_dim = self.os_shape[0]
+            output_dim = self.as_shape[0]
+            # student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 512, 256]).to(device)
+            student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 1024, 1024, 1024, 1024]).to(device)
+            student_model_path = "/app/one_policy_to_run_them_all/student/student_model_best_1m.pth"
+            if os.path.exists(student_model_path):
+                student_model.load_state_dict(torch.load(student_model_path))
+                student_model.eval()
+                rlx_logger.info(f"Loaded student model from {student_model_path}")
+                
+                def get_action_student(state):
+                    state_tensor = torch.FloatTensor(np.array(state)).to(device)
+                    with torch.no_grad():
+                        action_tensor = student_model(state_tensor)
+                    # import pdb; pdb.set_trace()
+                    return action_tensor.cpu().numpy()
+
+                get_action = lambda policy_state, state: get_action_student(state)
+                get_action_multi_render = lambda policy_state, state, env_id: get_action_student(state)
+            else:
+                rlx_logger.error(f"Student model not found at {student_model_path}")
+        
+         
+        if self.dagger_style:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            input_dim = self.os_shape[0]
+            output_dim = self.as_shape[0]
+            # student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 512, 256]).to(device)
+            student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 1024, 1024, 1024, 1024]).to(device)
+            student_model_path = "/app/one_policy_to_run_them_all/student/student_model_best.pth"
+            if os.path.exists(student_model_path):
+                student_model.load_state_dict(torch.load(student_model_path))
+                student_model.eval()
+                rlx_logger.info(f"Loaded student model from {student_model_path}")
+
+                def get_action_student(state):
+                    state_tensor = torch.FloatTensor(np.array(state)).to(device)
+                    with torch.no_grad():
+                        action_tensor = student_model(state_tensor)
+                    return action_tensor.cpu().numpy()
+                
+                get_student_action = lambda policy_state, state: get_action_student(state)
+
+            else:
+                rlx_logger.error(f"Student model not found at {student_model_path}")
+        
         for i in range(episodes):
             done = False
             episode_return = 0
             state, _ = self.env.reset()
-            while True:
-                if self.multi_render:
-                    processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+            if self.save_data:
+                if self.dagger_style:
+                    states = []
+                    actions = []
+                    total_iterations = self.data_points // self.nr_envs
+                    # Collect 30% of pure expert data
+                    expert_data_points = int(0.3 * total_iterations)
+                    for _ in range(expert_data_points):
+                        # import pdb; pdb.set_trace()
+                        if self.multi_render:
+                            processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+                        else:
+                            processed_action = get_action(self.policy_state, state)
+                        states.append(state)
+                        actions.append(processed_action)
+                        state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                        done = terminated | truncated
+                        episode_return += reward
+                    # Collect 70% of dagger data
+                    dagger_data_points = total_iterations - expert_data_points
+                    for _ in range(dagger_data_points):
+                        # Get student action for the current state
+                        processed_action_student = get_student_action(self.policy_state, state)
+                        state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action_student))
+                        done = terminated | truncated
+                        episode_return += reward
+                        # Now get expert action for the visited state
+                        if self.multi_render:
+                            processed_action_expert = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+                        else:
+                            processed_action_expert = get_action(self.policy_state, state)
+                        states.append(state)
+                        actions.append(processed_action_expert)
                 else:
-                    processed_action = get_action(self.policy_state, state)
-                state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
-                done = terminated | truncated
-                episode_return += reward
+                    states = []
+                    actions = []
+                    # Iterate for self.data_points/self.nr_envs steps and save data
+                    for _ in range(self.data_points // self.nr_envs):
+                        # import pdb; pdb.set_trace()
+                        if self.multi_render:
+                            processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+                        else:
+                            processed_action = get_action(self.policy_state, state)
+                        states.append(state)
+                        actions.append(processed_action)
+                        state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                        done = terminated | truncated
+                        episode_return += reward
+                        
+                states = np.concatenate(states, axis=0)
+                actions = np.concatenate(actions, axis=0)
+                # Save data to a file
+                output_dir = "teacher-student"
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, "teacher_dataset.npz")
+
+                np.savez(output_path, states=states, actions=actions)
+                print(f"Saved {states.shape[0]} samples to {output_path}")
+            else:
+                while True:
+                    if self.multi_render:
+                        processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+                    else:
+                        processed_action = get_action(self.policy_state, state)
+                    state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                    done = terminated | truncated
+                    episode_return += reward
             rlx_logger.info(f"Episode {i + 1} - Return: {episode_return}")
     
             

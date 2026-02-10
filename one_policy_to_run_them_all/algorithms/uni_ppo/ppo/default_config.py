@@ -33,4 +33,9 @@ def get_config(algorithm_name):
     config.save_latest_frequency = 204800
     config.determine_fastest_cpu_for_gpu = False
 
+    config.save_data = False
+    config.data_points = 1000000
+    config.use_student = False
+    config.dagger_style = False
+
     return config

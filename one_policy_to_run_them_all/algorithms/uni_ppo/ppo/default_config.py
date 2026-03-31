@@ -5,7 +5,7 @@ def get_config(algorithm_name):
     config = config_dict.ConfigDict()
 
     config.name = algorithm_name
-    
+
     config.device = "gpu"  # cpu, gpu
     config.total_timesteps = 1e9
     config.start_learning_rate = 3e-4
@@ -38,5 +38,20 @@ def get_config(algorithm_name):
     config.use_student = False
     config.dagger_style = False
     config.dagger_online = 0
+
+    config.student_model_path = "/app/one_policy_to_run_them_all/student/student_model_best.pth"
+    config.student_checkpoint_dir = "/app/one_policy_to_run_them_all/student"
+    config.student_dataset_path = "/app/one_policy_to_run_them_all/student/teacher_student_dagger_dataset.npz"
+    config.student_hidden_dims = [1024, 1024, 1024, 1024, 1024]
+    config.student_batch_size = 64
+    config.student_learning_rate = 1e-4
+    config.student_train_epochs = 60
+    config.student_num_workers = 0
+    config.rollout_policy_stage = "student"
+    config.snn_enabled = False
+    config.snn_threshold = 0.2
+    config.snn_timesteps = 3
+    config.snn_convert_every_iteration = True
+    config.snn_export_dir = "/app/one_policy_to_run_them_all/student/snn_exports"
 
     return config

@@ -80,8 +80,8 @@ class MultiRenderWrapper(gym.Wrapper):
                 env_to_render = f.read()
             # return 1 # GO1
             # return 9 # H1
-            return 4 # Anymal C
-            # return min(int(env_to_render), self.nr_envs-1)
+            # return 4 # Anymal C
+            return min(int(env_to_render), self.nr_envs-1)
         return 0
 
 

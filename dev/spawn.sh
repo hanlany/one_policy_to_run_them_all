@@ -11,6 +11,7 @@ docker run -it \
     -v $HOME/.Xauthority:/tmp/.Xauthority:ro \
     -v /tmp/.X11-unix:/tmp/.X11-unix \
     -v ./bash_history:/root/.bash_history \
+    --name=lavaurma_dev \
     --network=host \
     --gpus all \
     -v ./../one_policy_to_run_them_all:/app/one_policy_to_run_them_all \

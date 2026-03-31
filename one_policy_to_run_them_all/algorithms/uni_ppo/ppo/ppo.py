@@ -14,19 +14,50 @@ import orbax.checkpoint
 import optax
 import wandb
 import torch
-import torch.nn as nn
 import sys
 sys.path.append("/app/one_policy_to_run_them_all/student")
 try:
-    from train_student import StudentPolicy
+    from train_student import (
+        DEFAULT_HIDDEN_DIMS,
+        PolicyDistillationPipeline,
+        SNNConversionConfig,
+        StudentTrainingConfig,
+    )
 except ImportError:
-    print("Could not import StudentPolicy. Make sure train_student.py is in the path.")
+    print("Could not import student distillation utilities. Make sure train_student.py is in the path.")
 
 from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.general_properties import GeneralProperties
 from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.policy import get_policy
 from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.critic import get_critic
 
 rlx_logger = logging.getLogger("rl_x")
+
+
+class PolicyStageController:
+    def __init__(self, teacher_predict, initial_stage="teacher"):
+        self.teacher_predict = teacher_predict
+        self.stage = initial_stage
+        self.student_predict = None
+        self.snn_predict = None
+
+    def register_student(self, predict_fn):
+        self.student_predict = predict_fn
+
+    def register_snn(self, predict_fn):
+        self.snn_predict = predict_fn
+
+    def set_stage(self, stage):
+        self.stage = stage
+
+    def predict(self, policy_state, state, env_id=None, role="behavior"):
+        if role == "teacher_label":
+            return self.teacher_predict(policy_state, state, env_id)
+
+        if self.stage == "snn" and self.snn_predict is not None:
+            return self.snn_predict(state)
+        if self.stage in {"student", "snn"} and self.student_predict is not None:
+            return self.student_predict(state)
+        return self.teacher_predict(policy_state, state, env_id)
 
 
 class PPO:
@@ -770,6 +801,24 @@ class PPO:
             del algorithm_dict["dagger_style"]
         if "dagger_online" in algorithm_dict:
             del algorithm_dict["dagger_online"]
+        for key in (
+            "student_model_path",
+            "student_checkpoint_dir",
+            "student_dataset_path",
+            "student_hidden_dims",
+            "student_batch_size",
+            "student_learning_rate",
+            "student_train_epochs",
+            "student_num_workers",
+            "rollout_policy_stage",
+            "snn_enabled",
+            "snn_threshold",
+            "snn_timesteps",
+            "snn_convert_every_iteration",
+            "snn_export_dir",
+        ):
+            if key in algorithm_dict:
+                del algorithm_dict[key]
 
         # Restore only the configuration to check for missing keys
         restored_struct = checkpointer.restore(checkpoint_dir, item={"config_algorithm": algorithm_dict})
@@ -803,10 +852,9 @@ class PPO:
     
 
     def test(self, episodes):
-        import pdb;
         @jax.jit
         def get_action(policy_state, state):
-            @partial(jax.jit, static_argnums=(1,2))
+            @partial(jax.jit, static_argnums=(1, 2))
             def get_action_single(state, env_id_0, env_id_1):
                 state_b = state[env_id_0:env_id_1]
 
@@ -821,21 +869,14 @@ class PPO:
                 action_mean_b, action_logstd_b = self.policy.apply(policy_state.params, dynamic_joint_description_b, dynamic_joint_state_b, dynamic_foot_description_b, dynamic_foot_state_b, state_b[:, self.policy_general_state_mask[env_id_0]])
 
                 action = jnp.concatenate([action_mean_b, jnp.zeros((self.nr_envs_per_env_type, self.missing_nr_of_actions[env_id_0]))], axis=1)
-                processed_action = self.get_processed_action(action)
-
-                return processed_action
-
+                return self.get_processed_action(action)
 
             processed_actions = []
             for i in range(self.env_ids.shape[0] - 1):
                 env_id_0 = self.env_ids[i]
                 env_id_1 = self.env_ids[i + 1]
-                processed_action = get_action_single(state, env_id_0, env_id_1)
-                processed_actions.append(processed_action)
-            processed_action = jnp.concatenate(processed_actions, axis=0)
-
-            return processed_action
-        
+                processed_actions.append(get_action_single(state, env_id_0, env_id_1))
+            return jnp.concatenate(processed_actions, axis=0)
 
         @partial(jax.jit, static_argnums=(2))
         def get_action_multi_render(policy_state, state, env_id):
@@ -848,115 +889,113 @@ class PPO:
             dynamic_foot_state_b = dynamic_foot_combined_state_b[:, :, self.dynamic_foot_description_size:]
 
             action_mean_b, action_logstd_b = self.policy.apply(policy_state.params, dynamic_joint_description_b, dynamic_joint_state_b, dynamic_foot_description_b, dynamic_foot_state_b, state[:, self.policy_general_state_mask[env_id]])
-
             action = jnp.concatenate([action_mean_b, jnp.zeros((self.nr_envs_per_env_type, self.missing_nr_of_actions[env_id]))], axis=1)
-            processed_action = self.get_processed_action(action)
+            return self.get_processed_action(action)
 
-            return processed_action
-        
-        
         self.set_eval_mode()
 
-        def get_student_action(policy_state, state):
-            pass
+        algorithm_config = self.config.algorithm
+        student_checkpoint_dir = getattr(algorithm_config, "student_checkpoint_dir", "/app/one_policy_to_run_them_all/student")
+        student_model_path = getattr(algorithm_config, "student_model_path", os.path.join(student_checkpoint_dir, "student_model_best.pth"))
+        student_dataset_path = getattr(algorithm_config, "student_dataset_path", os.path.join(student_checkpoint_dir, "teacher_student_dagger_dataset.npz"))
+        student_hidden_dims = list(getattr(algorithm_config, "student_hidden_dims", DEFAULT_HIDDEN_DIMS))
+        rollout_policy_stage = getattr(algorithm_config, "rollout_policy_stage", "student")
+        snn_enabled = getattr(algorithm_config, "snn_enabled", False)
+        snn_threshold = getattr(algorithm_config, "snn_threshold", 0.1)
+        snn_timesteps = getattr(algorithm_config, "snn_timesteps", 10)
+        snn_convert_every_iteration = getattr(algorithm_config, "snn_convert_every_iteration", True)
+        snn_export_dir = getattr(algorithm_config, "snn_export_dir", os.path.join(student_checkpoint_dir, "snn_exports"))
 
-        if self.use_student:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            input_dim = self.os_shape[0]
-            output_dim = self.as_shape[0]
-            # student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 512, 256]).to(device)
-            student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 1024, 1024, 1024, 1024]).to(device)
-            # student_model_path = "/app/one_policy_to_run_them_all/student/student_model_best_1m.pth"
-            # student_model_path = "/app/one_policy_to_run_them_all/student/student_model_dagger_iter_10.pth"
-            # student_model_path = "/app/one_policy_to_run_them_all/student/trial_2/student_model_dagger_iter_9.pth" # H1 walking
-            student_model_path = "/app/one_policy_to_run_them_all/student/student_model_dagger_iter_30.pth" # H1 walking
-            # student_model_path = "/app/one_policy_to_run_them_all/student/trial_3/student_model_dagger_iter_39.pth" # H1 not walking
-            if os.path.exists(student_model_path):
-                student_model.load_state_dict(torch.load(student_model_path))
-                student_model.eval()
-                rlx_logger.info(f"Loaded student model from {student_model_path}")
-                
-                def get_action_student(state):
-                    state_tensor = torch.FloatTensor(np.array(state)).to(device)
-                    with torch.no_grad():
-                        action_tensor = student_model(state_tensor)
-                    # import pdb; pdb.set_trace()
-                    return action_tensor.cpu().numpy()
+        pipeline = PolicyDistillationPipeline(
+            input_dim=self.os_shape[0],
+            output_dim=self.as_shape[0],
+            student_hidden_dims=student_hidden_dims,
+            training_config=StudentTrainingConfig(
+                dataset_path=student_dataset_path,
+                batch_size=getattr(algorithm_config, "student_batch_size", 64),
+                learning_rate=getattr(algorithm_config, "student_learning_rate", 1e-4),
+                epochs=getattr(algorithm_config, "student_train_epochs", 60),
+                hidden_dims=student_hidden_dims,
+                num_workers=getattr(algorithm_config, "student_num_workers", 0),
+                checkpoint_dir=student_checkpoint_dir,
+                best_checkpoint_name=os.path.basename(student_model_path),
+            ),
+            snn_config=SNNConversionConfig(
+                threshold=snn_threshold,
+                timesteps=snn_timesteps,
+                export_dir=snn_export_dir,
+            ),
+        )
 
-                get_action = lambda policy_state, state: get_action_student(state)
-                get_action_multi_render = lambda policy_state, state, env_id: get_action_student(state)
+        def teacher_predict(policy_state, state, env_id=None):
+            if self.multi_render and env_id is not None:
+                return get_action_multi_render(policy_state, state, env_id)
+            return get_action(policy_state, state)
+
+        controller = PolicyStageController(teacher_predict=teacher_predict, initial_stage=rollout_policy_stage)
+
+        def current_env_id():
+            return self.env.active_env_id if self.multi_render else None
+
+        def get_behavior_action(state):
+            return controller.predict(self.policy_state, state, env_id=current_env_id(), role="behavior")
+
+        def get_teacher_label_action(state):
+            return controller.predict(self.policy_state, state, env_id=current_env_id(), role="teacher_label")
+
+        def load_student_checkpoint(log_missing=False):
+            if not os.path.exists(student_model_path):
+                if log_missing:
+                    rlx_logger.warning(f"Student model not found at {student_model_path}")
+                return False
+            pipeline.load_student_policy(student_model_path)
+            controller.register_student(pipeline.predict_student)
+            rlx_logger.info(f"Loaded student model from {student_model_path}")
+            return True
+
+        def build_snn_artifact(export_name=None):
+            if not snn_enabled:
+                return False
+            try:
+                pipeline.build_snn_policy(student_model=pipeline.student_model)
+                controller.register_snn(pipeline.predict_snn)
+            except Exception as exc:
+                rlx_logger.warning(f"Could not build SNN policy: {exc}")
+                return False
+
+            if export_name and snn_export_dir:
+                try:
+                    export_path = os.path.join(snn_export_dir, export_name)
+                    pipeline.snn_policy.export(export_path)
+                    rlx_logger.info(f"Exported SNN model to {export_path}")
+                except Exception as exc:
+                    rlx_logger.warning(f"Built SNN policy but failed to export it: {exc}")
+            return True
+
+        if self.use_student or self.dagger_style or self.dagger_online or snn_enabled or rollout_policy_stage in {"student", "snn"}:
+            if load_student_checkpoint(log_missing=self.use_student or self.dagger_style or self.dagger_online):
+                controller.set_stage("student")
+                if rollout_policy_stage == "snn" and build_snn_artifact():
+                    controller.set_stage("snn")
             else:
-                rlx_logger.error(f"Student model not found at {student_model_path}")
-        
-         
-        if self.dagger_style:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            input_dim = self.os_shape[0]
-            output_dim = self.as_shape[0]
-            # student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 512, 256]).to(device)
-            student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 1024, 1024, 1024, 1024]).to(device)
-            student_model_path = "/app/one_policy_to_run_them_all/student/student_model_best.pth"
-            if os.path.exists(student_model_path):
-                student_model.load_state_dict(torch.load(student_model_path))
-                student_model.eval()
-                rlx_logger.info(f"Loaded student model from {student_model_path}")
+                controller.set_stage("teacher")
 
-                def get_action_student(state):
-                    state_tensor = torch.FloatTensor(np.array(state)).to(device)
-                    with torch.no_grad():
-                        action_tensor = student_model(state_tensor)
-                    return action_tensor.cpu().numpy()
-                
-                get_student_action = lambda policy_state, state: get_action_student(state)
-
-            else:
-                rlx_logger.error(f"Student model not found at {student_model_path}")
-        
         if self.dagger_online:
-            # DAgger Online Training
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            input_dim = self.os_shape[0]
-            output_dim = self.as_shape[0]
-            student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 1024, 1024, 1024, 1024]).to(device)
-            
-            # Load pre-trained student model if available
-            pretrained_model_path = "/app/one_policy_to_run_them_all/student/student_model_best.pth"
-            if os.path.exists(pretrained_model_path):
-                student_model.load_state_dict(torch.load(pretrained_model_path))
-                rlx_logger.info(f"Loaded pre-trained student model from {pretrained_model_path}")
-            else:
-                rlx_logger.info("No pre-trained student model found. Starting from scratch.")
-            
-            optimizer = torch.optim.Adam(student_model.parameters(), lr=1e-4)
-            criterion = torch.nn.MSELoss()
-            
             rlx_logger.info(f"Starting DAgger online training for {self.dagger_online} iterations")
-            
-            # Initialize student action function
-            def get_student_action_online(state):
-                state_tensor = torch.FloatTensor(np.array(state)).to(device)
-                with torch.no_grad():
-                    action_tensor = student_model(state_tensor)
-                return action_tensor.cpu().numpy()
-            
-            # Collect data
+            if pipeline.student_model is None:
+                pipeline.build_student_policy()
+                controller.register_student(pipeline.predict_student)
+
             states_buffer = []
             actions_buffer = []
-            
-            student_model_best_loss = float('inf')
-
             for iteration in range(self.dagger_online):
                 rlx_logger.info(f"DAgger Iteration {iteration + 1}/{self.dagger_online}")
-                
-                
                 state, _ = self.env.reset()
                 episode_return = 0
-                
                 states = []
                 actions = []
                 total_iterations = self.data_points // self.nr_envs
-                
-                # Determine expert data ratio dynamically
+
                 if iteration == 0:
                     expert_ratio = 1.0
                 elif iteration == 1:
@@ -965,170 +1004,111 @@ class PPO:
                     expert_ratio = 0.25
                 else:
                     expert_ratio = 0.0
-                
-                # Collect expert data
+
                 expert_data_points = int(expert_ratio * total_iterations)
+                controller.set_stage("teacher")
                 for _ in range(expert_data_points):
-                    if self.multi_render:
-                        processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
-                    else:
-                        processed_action = get_action(self.policy_state, state)
-                    states.append(state)
-                    actions.append(processed_action)
+                    processed_action = get_teacher_label_action(state)
+                    states.append(np.array(state, copy=True))
+                    actions.append(np.array(jax.device_get(processed_action), copy=True))
                     state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                     episode_return += reward
-                
-                # Collect remaining data using student policy (with expert labels)
+
+                controller.set_stage(rollout_policy_stage if rollout_policy_stage in {"student", "snn"} else "student")
                 student_data_points = total_iterations - expert_data_points
                 for _ in range(student_data_points):
-                    # Get expert action for the current state (label)
-                    if self.multi_render:
-                        processed_action_expert = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
-                    else:
-                        processed_action_expert = get_action(self.policy_state, state)
-                    states.append(state)
-                    actions.append(processed_action_expert)
-                    
-                    # Get student action and execute it
-                    processed_action_student = get_student_action_online(state)
-                    state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action_student))
+                    processed_action_expert = get_teacher_label_action(state)
+                    states.append(np.array(state, copy=True))
+                    actions.append(np.array(jax.device_get(processed_action_expert), copy=True))
+                    processed_action_behavior = get_behavior_action(state)
+                    state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action_behavior))
                     episode_return += reward
-                
+
                 states = np.concatenate(states, axis=0)
                 actions = np.concatenate(actions, axis=0)
                 states_buffer.append(states)
                 actions_buffer.append(actions)
-                
                 rlx_logger.info(f"Iteration {iteration + 1} - Return: {episode_return}")
-                
-                # Concatenate all collected data for training
+
                 states_train = np.concatenate(states_buffer, axis=0)
                 actions_train = np.concatenate(actions_buffer, axis=0)
                 rlx_logger.info(f"Collected {states_train.shape[0]} samples for iteration {iteration + 1}")
-                
-                # Train student model for 60 epochs
-                dataset = torch.utils.data.TensorDataset(
-                    torch.FloatTensor(states_train),
-                    torch.FloatTensor(actions_train)
+
+                artifacts = pipeline.train_on_aggregated_data(
+                    states=states_train,
+                    actions=actions_train,
+                    iteration=iteration + 1,
                 )
-                train_loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
-                
-                student_model.train()
-                for epoch in range(60):
-                    train_loss = 0.0
-                    for batch_states, batch_actions in train_loader:
-                        batch_states, batch_actions = batch_states.to(device), batch_actions.to(device)
-                        
-                        optimizer.zero_grad()
-                        predicted_actions = student_model(batch_states)
-                        loss = criterion(predicted_actions, batch_actions)
-                        loss.backward()
-                        optimizer.step()
-                        
-                        train_loss += loss.item()
-                    
-                    avg_train_loss = train_loss / len(train_loader)
-                    if avg_train_loss < student_model_best_loss:
-                        student_model_best_loss = avg_train_loss
-                        best_model_path = "/app/one_policy_to_run_them_all/student/trial_3/student_model_dagger_best.pth"
-                        torch.save(student_model.state_dict(), best_model_path)
-                        rlx_logger.info(f"Saved best student model to {best_model_path}")
+                controller.register_student(pipeline.predict_student)
+                controller.set_stage("student")
+                rlx_logger.info(
+                    f"Student update {iteration + 1}: train_loss={artifacts.last_train_loss:.6f}, "
+                    f"val_loss={artifacts.last_val_loss:.6f}, best_val={artifacts.best_val_loss:.6f}"
+                )
 
-                    if (epoch + 1) % 10 == 0:
-                        rlx_logger.info(f"Iteration {iteration + 1}, Epoch {epoch + 1}/50, Loss: {avg_train_loss:.6f}")
-                
-                # Save student model after each iteration
-                student_model_path = f"/app/one_policy_to_run_them_all/student/trial_3/student_model_dagger_iter_{iteration + 1}.pth"
-                torch.save(student_model.state_dict(), student_model_path)
-                rlx_logger.info(f"Saved student model to {student_model_path}")
-            
-            # Save final student model
-            final_model_path = "/app/one_policy_to_run_them_all/student/trial_3/student_model_dagger_final.pth"
-            torch.save(student_model.state_dict(), final_model_path)
-            rlx_logger.info(f"DAgger online training complete. Final model saved to {final_model_path}")
+                if snn_enabled and (snn_convert_every_iteration or controller.snn_predict is None or rollout_policy_stage == "snn"):
+                    export_name = f"student_model_dagger_iter_{iteration + 1}.hdf5"
+                    if build_snn_artifact(export_name=export_name) and rollout_policy_stage == "snn":
+                        controller.set_stage("snn")
 
-            # Save final dataset
-            final_data_path = "/app/one_policy_to_run_them_all/student/trial_3/teacher_student_dagger_dataset.npz"
+            final_data_dir = os.path.dirname(student_dataset_path)
+            if final_data_dir:
+                os.makedirs(final_data_dir, exist_ok=True)
             states_final = np.concatenate(states_buffer, axis=0)
             actions_final = np.concatenate(actions_buffer, axis=0)
-            np.savez(final_data_path, states=states_final, actions=actions_final)
-            rlx_logger.info(f"Saved aggregated DAgger dataset ({states_final.shape[0]} samples) to {final_data_path}")
-            
-        else:
-            for i in range(episodes):
-                done = False
-                episode_return = 0
-                state, _ = self.env.reset()
-                if self.save_data:
-                    if self.dagger_style:
-                        states = []
-                        actions = []
-                        total_iterations = self.data_points // self.nr_envs
-                        # Collect 30% of pure expert data
-                        expert_data_points = int(0.3 * total_iterations)
-                        for _ in range(expert_data_points):
-                            # import pdb; pdb.set_trace()
-                            if self.multi_render:
-                                processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
-                            else:
-                                processed_action = get_action(self.policy_state, state)
-                            states.append(state)
-                            actions.append(processed_action)
-                            state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
-                            done = terminated | truncated
-                            episode_return += reward
-                        # Collect 70% of dagger data
-                        dagger_data_points = total_iterations - expert_data_points
-                        for _ in range(dagger_data_points):
-                            # Get student action for the current state
-                            processed_action_student = get_student_action(self.policy_state, state)
-                            state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action_student))
-                            done = terminated | truncated
-                            episode_return += reward
-                            # Now get expert action for the visited state
-                            if self.multi_render:
-                                processed_action_expert = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
-                            else:
-                                processed_action_expert = get_action(self.policy_state, state)
-                            states.append(state)
-                            actions.append(processed_action_expert)
-                    else:
-                        states = []
-                        actions = []
-                        # Iterate for self.data_points/self.nr_envs steps and save data
-                        for _ in range(self.data_points // self.nr_envs):
-                            # import pdb; pdb.set_trace()
-                            if self.multi_render:
-                                processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
-                            else:
-                                processed_action = get_action(self.policy_state, state)
-                            states.append(state)
-                            actions.append(processed_action)
-                            state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
-                            done = terminated | truncated
-                            episode_return += reward
-                            
-                    states = np.concatenate(states, axis=0)
-                    actions = np.concatenate(actions, axis=0)
-                    # Save data to a file
-                    output_dir = "teacher-student"
-                    os.makedirs(output_dir, exist_ok=True)
-                    output_path = os.path.join(output_dir, "teacher_dataset.npz")
+            np.savez(student_dataset_path, states=states_final, actions=actions_final)
+            rlx_logger.info(f"Saved aggregated DAgger dataset ({states_final.shape[0]} samples) to {student_dataset_path}")
+            return
 
-                    np.savez(output_path, states=states, actions=actions)
-                    print(f"Saved {states.shape[0]} samples to {output_path}")
-                else:
-                    while True:
-                        if self.multi_render:
-                            processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
-                        else:
-                            processed_action = get_action(self.policy_state, state)
+        for i in range(episodes):
+            episode_return = 0
+            state, _ = self.env.reset()
+            if self.save_data:
+                states = []
+                actions = []
+                total_iterations = self.data_points // self.nr_envs
+                if self.dagger_style:
+                    expert_data_points = int(0.3 * total_iterations)
+                    controller.set_stage("teacher")
+                    for _ in range(expert_data_points):
+                        processed_action = get_teacher_label_action(state)
+                        states.append(np.array(state, copy=True))
+                        actions.append(np.array(jax.device_get(processed_action), copy=True))
                         state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
-                        done = terminated | truncated
                         episode_return += reward
-                rlx_logger.info(f"Episode {i + 1} - Return: {episode_return}")
-    
-            
+
+                    controller.set_stage(rollout_policy_stage if rollout_policy_stage in {"student", "snn"} else "student")
+                    dagger_data_points = total_iterations - expert_data_points
+                    for _ in range(dagger_data_points):
+                        processed_action_behavior = get_behavior_action(state)
+                        state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action_behavior))
+                        episode_return += reward
+                        processed_action_expert = get_teacher_label_action(state)
+                        states.append(np.array(state, copy=True))
+                        actions.append(np.array(jax.device_get(processed_action_expert), copy=True))
+                else:
+                    for _ in range(total_iterations):
+                        processed_action = get_behavior_action(state)
+                        states.append(np.array(state, copy=True))
+                        actions.append(np.array(jax.device_get(processed_action), copy=True))
+                        state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                        episode_return += reward
+
+                states = np.concatenate(states, axis=0)
+                actions = np.concatenate(actions, axis=0)
+                output_dir = "teacher-student"
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, "teacher_dataset.npz")
+                np.savez(output_path, states=states, actions=actions)
+                print(f"Saved {states.shape[0]} samples to {output_path}")
+            else:
+                while True:
+                    processed_action = get_behavior_action(state)
+                    state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                    episode_return += reward
+            rlx_logger.info(f"Episode {i + 1} - Return: {episode_return}")
+
+
     def set_train_mode(self):
         ...
 

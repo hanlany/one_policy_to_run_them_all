@@ -37,5 +37,6 @@ def get_config(algorithm_name):
     config.data_points = 1000000
     config.use_student = False
     config.dagger_style = False
+    config.dagger_online = 0
 
     return config

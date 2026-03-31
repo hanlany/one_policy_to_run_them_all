@@ -65,6 +65,7 @@ class PPO:
         self.save_data = config.algorithm.save_data
         self.data_points = config.algorithm.data_points
         self.dagger_style = config.algorithm.dagger_style
+        self.dagger_online = config.algorithm.dagger_online
         self.determine_fastest_cpu_for_gpu = config.algorithm.determine_fastest_cpu_for_gpu
         self.use_student = config.algorithm.use_student
         self.multi_render = config.environment.multi_render
@@ -767,6 +768,8 @@ class PPO:
             del algorithm_dict["use_student"]
         if "dagger_style" in algorithm_dict:
             del algorithm_dict["dagger_style"]
+        if "dagger_online" in algorithm_dict:
+            del algorithm_dict["dagger_online"]
 
         # Restore only the configuration to check for missing keys
         restored_struct = checkpointer.restore(checkpoint_dir, item={"config_algorithm": algorithm_dict})
@@ -863,7 +866,11 @@ class PPO:
             output_dim = self.as_shape[0]
             # student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 512, 256]).to(device)
             student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 1024, 1024, 1024, 1024]).to(device)
-            student_model_path = "/app/one_policy_to_run_them_all/student/student_model_best_1m.pth"
+            # student_model_path = "/app/one_policy_to_run_them_all/student/student_model_best_1m.pth"
+            # student_model_path = "/app/one_policy_to_run_them_all/student/student_model_dagger_iter_10.pth"
+            # student_model_path = "/app/one_policy_to_run_them_all/student/trial_2/student_model_dagger_iter_9.pth" # H1 walking
+            student_model_path = "/app/one_policy_to_run_them_all/student/student_model_dagger_iter_30.pth" # H1 walking
+            # student_model_path = "/app/one_policy_to_run_them_all/student/trial_3/student_model_dagger_iter_39.pth" # H1 not walking
             if os.path.exists(student_model_path):
                 student_model.load_state_dict(torch.load(student_model_path))
                 student_model.eval()
@@ -905,78 +912,221 @@ class PPO:
             else:
                 rlx_logger.error(f"Student model not found at {student_model_path}")
         
-        for i in range(episodes):
-            done = False
-            episode_return = 0
-            state, _ = self.env.reset()
-            if self.save_data:
-                if self.dagger_style:
-                    states = []
-                    actions = []
-                    total_iterations = self.data_points // self.nr_envs
-                    # Collect 30% of pure expert data
-                    expert_data_points = int(0.3 * total_iterations)
-                    for _ in range(expert_data_points):
-                        # import pdb; pdb.set_trace()
-                        if self.multi_render:
-                            processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
-                        else:
-                            processed_action = get_action(self.policy_state, state)
-                        states.append(state)
-                        actions.append(processed_action)
-                        state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
-                        done = terminated | truncated
-                        episode_return += reward
-                    # Collect 70% of dagger data
-                    dagger_data_points = total_iterations - expert_data_points
-                    for _ in range(dagger_data_points):
-                        # Get student action for the current state
-                        processed_action_student = get_student_action(self.policy_state, state)
-                        state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action_student))
-                        done = terminated | truncated
-                        episode_return += reward
-                        # Now get expert action for the visited state
-                        if self.multi_render:
-                            processed_action_expert = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
-                        else:
-                            processed_action_expert = get_action(self.policy_state, state)
-                        states.append(state)
-                        actions.append(processed_action_expert)
-                else:
-                    states = []
-                    actions = []
-                    # Iterate for self.data_points/self.nr_envs steps and save data
-                    for _ in range(self.data_points // self.nr_envs):
-                        # import pdb; pdb.set_trace()
-                        if self.multi_render:
-                            processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
-                        else:
-                            processed_action = get_action(self.policy_state, state)
-                        states.append(state)
-                        actions.append(processed_action)
-                        state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
-                        done = terminated | truncated
-                        episode_return += reward
-                        
-                states = np.concatenate(states, axis=0)
-                actions = np.concatenate(actions, axis=0)
-                # Save data to a file
-                output_dir = "teacher-student"
-                os.makedirs(output_dir, exist_ok=True)
-                output_path = os.path.join(output_dir, "teacher_dataset.npz")
-
-                np.savez(output_path, states=states, actions=actions)
-                print(f"Saved {states.shape[0]} samples to {output_path}")
+        if self.dagger_online:
+            # DAgger Online Training
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            input_dim = self.os_shape[0]
+            output_dim = self.as_shape[0]
+            student_model = StudentPolicy(input_dim, output_dim, hidden_dims=[1024, 1024, 1024, 1024, 1024]).to(device)
+            
+            # Load pre-trained student model if available
+            pretrained_model_path = "/app/one_policy_to_run_them_all/student/student_model_best.pth"
+            if os.path.exists(pretrained_model_path):
+                student_model.load_state_dict(torch.load(pretrained_model_path))
+                rlx_logger.info(f"Loaded pre-trained student model from {pretrained_model_path}")
             else:
-                while True:
+                rlx_logger.info("No pre-trained student model found. Starting from scratch.")
+            
+            optimizer = torch.optim.Adam(student_model.parameters(), lr=1e-4)
+            criterion = torch.nn.MSELoss()
+            
+            rlx_logger.info(f"Starting DAgger online training for {self.dagger_online} iterations")
+            
+            # Initialize student action function
+            def get_student_action_online(state):
+                state_tensor = torch.FloatTensor(np.array(state)).to(device)
+                with torch.no_grad():
+                    action_tensor = student_model(state_tensor)
+                return action_tensor.cpu().numpy()
+            
+            # Collect data
+            states_buffer = []
+            actions_buffer = []
+            
+            student_model_best_loss = float('inf')
+
+            for iteration in range(self.dagger_online):
+                rlx_logger.info(f"DAgger Iteration {iteration + 1}/{self.dagger_online}")
+                
+                
+                state, _ = self.env.reset()
+                episode_return = 0
+                
+                states = []
+                actions = []
+                total_iterations = self.data_points // self.nr_envs
+                
+                # Determine expert data ratio dynamically
+                if iteration == 0:
+                    expert_ratio = 1.0
+                elif iteration == 1:
+                    expert_ratio = 0.5
+                elif iteration == 2:
+                    expert_ratio = 0.25
+                else:
+                    expert_ratio = 0.0
+                
+                # Collect expert data
+                expert_data_points = int(expert_ratio * total_iterations)
+                for _ in range(expert_data_points):
                     if self.multi_render:
                         processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
                     else:
                         processed_action = get_action(self.policy_state, state)
+                    states.append(state)
+                    actions.append(processed_action)
                     state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
-                    done = terminated | truncated
                     episode_return += reward
-            rlx_logger.info(f"Episode {i + 1} - Return: {episode_return}")
+                
+                # Collect remaining data using student policy (with expert labels)
+                student_data_points = total_iterations - expert_data_points
+                for _ in range(student_data_points):
+                    # Get expert action for the current state (label)
+                    if self.multi_render:
+                        processed_action_expert = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+                    else:
+                        processed_action_expert = get_action(self.policy_state, state)
+                    states.append(state)
+                    actions.append(processed_action_expert)
+                    
+                    # Get student action and execute it
+                    processed_action_student = get_student_action_online(state)
+                    state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action_student))
+                    episode_return += reward
+                
+                states = np.concatenate(states, axis=0)
+                actions = np.concatenate(actions, axis=0)
+                states_buffer.append(states)
+                actions_buffer.append(actions)
+                
+                rlx_logger.info(f"Iteration {iteration + 1} - Return: {episode_return}")
+                
+                # Concatenate all collected data for training
+                states_train = np.concatenate(states_buffer, axis=0)
+                actions_train = np.concatenate(actions_buffer, axis=0)
+                rlx_logger.info(f"Collected {states_train.shape[0]} samples for iteration {iteration + 1}")
+                
+                # Train student model for 60 epochs
+                dataset = torch.utils.data.TensorDataset(
+                    torch.FloatTensor(states_train),
+                    torch.FloatTensor(actions_train)
+                )
+                train_loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
+                
+                student_model.train()
+                for epoch in range(60):
+                    train_loss = 0.0
+                    for batch_states, batch_actions in train_loader:
+                        batch_states, batch_actions = batch_states.to(device), batch_actions.to(device)
+                        
+                        optimizer.zero_grad()
+                        predicted_actions = student_model(batch_states)
+                        loss = criterion(predicted_actions, batch_actions)
+                        loss.backward()
+                        optimizer.step()
+                        
+                        train_loss += loss.item()
+                    
+                    avg_train_loss = train_loss / len(train_loader)
+                    if avg_train_loss < student_model_best_loss:
+                        student_model_best_loss = avg_train_loss
+                        best_model_path = "/app/one_policy_to_run_them_all/student/trial_3/student_model_dagger_best.pth"
+                        torch.save(student_model.state_dict(), best_model_path)
+                        rlx_logger.info(f"Saved best student model to {best_model_path}")
+
+                    if (epoch + 1) % 10 == 0:
+                        rlx_logger.info(f"Iteration {iteration + 1}, Epoch {epoch + 1}/50, Loss: {avg_train_loss:.6f}")
+                
+                # Save student model after each iteration
+                student_model_path = f"/app/one_policy_to_run_them_all/student/trial_3/student_model_dagger_iter_{iteration + 1}.pth"
+                torch.save(student_model.state_dict(), student_model_path)
+                rlx_logger.info(f"Saved student model to {student_model_path}")
+            
+            # Save final student model
+            final_model_path = "/app/one_policy_to_run_them_all/student/trial_3/student_model_dagger_final.pth"
+            torch.save(student_model.state_dict(), final_model_path)
+            rlx_logger.info(f"DAgger online training complete. Final model saved to {final_model_path}")
+
+            # Save final dataset
+            final_data_path = "/app/one_policy_to_run_them_all/student/trial_3/teacher_student_dagger_dataset.npz"
+            states_final = np.concatenate(states_buffer, axis=0)
+            actions_final = np.concatenate(actions_buffer, axis=0)
+            np.savez(final_data_path, states=states_final, actions=actions_final)
+            rlx_logger.info(f"Saved aggregated DAgger dataset ({states_final.shape[0]} samples) to {final_data_path}")
+            
+        else:
+            for i in range(episodes):
+                done = False
+                episode_return = 0
+                state, _ = self.env.reset()
+                if self.save_data:
+                    if self.dagger_style:
+                        states = []
+                        actions = []
+                        total_iterations = self.data_points // self.nr_envs
+                        # Collect 30% of pure expert data
+                        expert_data_points = int(0.3 * total_iterations)
+                        for _ in range(expert_data_points):
+                            # import pdb; pdb.set_trace()
+                            if self.multi_render:
+                                processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+                            else:
+                                processed_action = get_action(self.policy_state, state)
+                            states.append(state)
+                            actions.append(processed_action)
+                            state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                            done = terminated | truncated
+                            episode_return += reward
+                        # Collect 70% of dagger data
+                        dagger_data_points = total_iterations - expert_data_points
+                        for _ in range(dagger_data_points):
+                            # Get student action for the current state
+                            processed_action_student = get_student_action(self.policy_state, state)
+                            state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action_student))
+                            done = terminated | truncated
+                            episode_return += reward
+                            # Now get expert action for the visited state
+                            if self.multi_render:
+                                processed_action_expert = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+                            else:
+                                processed_action_expert = get_action(self.policy_state, state)
+                            states.append(state)
+                            actions.append(processed_action_expert)
+                    else:
+                        states = []
+                        actions = []
+                        # Iterate for self.data_points/self.nr_envs steps and save data
+                        for _ in range(self.data_points // self.nr_envs):
+                            # import pdb; pdb.set_trace()
+                            if self.multi_render:
+                                processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+                            else:
+                                processed_action = get_action(self.policy_state, state)
+                            states.append(state)
+                            actions.append(processed_action)
+                            state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                            done = terminated | truncated
+                            episode_return += reward
+                            
+                    states = np.concatenate(states, axis=0)
+                    actions = np.concatenate(actions, axis=0)
+                    # Save data to a file
+                    output_dir = "teacher-student"
+                    os.makedirs(output_dir, exist_ok=True)
+                    output_path = os.path.join(output_dir, "teacher_dataset.npz")
+
+                    np.savez(output_path, states=states, actions=actions)
+                    print(f"Saved {states.shape[0]} samples to {output_path}")
+                else:
+                    while True:
+                        if self.multi_render:
+                            processed_action = get_action_multi_render(self.policy_state, state, self.env.active_env_id)
+                        else:
+                            processed_action = get_action(self.policy_state, state)
+                        state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                        done = terminated | truncated
+                        episode_return += reward
+                rlx_logger.info(f"Episode {i + 1} - Return: {episode_return}")
     
             
     def set_train_mode(self):

@@ -78,7 +78,10 @@ class MultiRenderWrapper(gym.Wrapper):
         elif os.path.isfile(self.file_name):
             with open(self.file_name, "r") as f:
                 env_to_render = f.read()
-            return min(int(env_to_render), self.nr_envs-1)
+            # return 1 # GO1
+            # return 9 # H1
+            return 4 # Anymal C
+            # return min(int(env_to_render), self.nr_envs-1)
         return 0
 
 

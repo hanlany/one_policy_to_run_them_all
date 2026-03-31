@@ -47,7 +47,8 @@ def train():
     print(f"Using device: {device}")
     
     # Load Data
-    dataset_path = 'teacher_dataset.npz'
+    # dataset_path = 'teacher_dataset.npz'
+    dataset_path = 'teacher_student_dagger_dataset.npz'
     if not os.path.exists(dataset_path):
         print(f"Error: {dataset_path} not found.")
         return

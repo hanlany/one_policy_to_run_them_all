@@ -20,7 +20,7 @@ class AsyncVectorEnvWithSkipping(gym.vector.AsyncVectorEnv):
                     start_method = "forkserver"
                 elif "spawn" in all_start_methods:
                     start_method = "spawn"
-        super().__init__(env_fns, observation_space, action_space, shared_memory, copy, None, daemon, worker)
+        super().__init__(env_fns, observation_space, action_space, shared_memory, copy, start_method, daemon, worker)
         
         if not shared_memory:
             raise NotImplementedError("AsyncVectorEnvWithSkipping only supports shared_memory=True.")

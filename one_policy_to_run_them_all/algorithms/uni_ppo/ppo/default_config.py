@@ -53,5 +53,10 @@ def get_config(algorithm_name):
     config.snn_timesteps = 3
     config.snn_convert_every_iteration = True
     config.snn_export_dir = "/app/one_policy_to_run_them_all/student/snn_exports"
+    config.record = False
+    config.record_robot_index = -1
+    config.record_seconds = 10.0
+    config.record_fps = 60
+    config.record_dir = "/app/one_policy_to_run_them_all/experiments/videos"
 
     return config

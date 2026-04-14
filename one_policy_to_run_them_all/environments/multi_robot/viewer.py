@@ -1,5 +1,6 @@
 import glfw
 import mujoco
+import numpy as np
 import time
 from itertools import cycle
 
@@ -40,7 +41,7 @@ class MujocoViewer:
 
         self.camera = mujoco.MjvCamera()
         mujoco.mjv_defaultFreeCamera(model, self.camera)
-        self.all_camera_modes = ("static", "follow")
+        self.all_camera_modes = ("follow", "static")
         self.camera_mode_iter = cycle(self.all_camera_modes)
         self.camera_mode = next(self.camera_mode_iter)
         self.camera_mode_target = self.camera_mode
@@ -96,20 +97,44 @@ class MujocoViewer:
     def scroll(self, window, x_offset, y_offset):
         mujoco.mjv_moveCamera(self.model, mujoco.mjtMouse.mjMOUSE_ZOOM, 0, 0.05 * y_offset, self.scene, self.camera)
 
+    def _render_scene(self, data):
+        glfw.make_context_current(self.window)
+        mujoco.mjv_updateScene(self.model, data, self.scene_option, None, self.camera,
+                               mujoco.mjtCatBit.mjCAT_ALL,
+                               self.scene)
+        self.viewport.width, self.viewport.height = glfw.get_framebuffer_size(self.window)
+        mujoco.mjr_render(self.viewport, self.scene, self.context)
+
+        if not self.hide_menu:
+            for gridpos, [t1, t2] in self.overlay.items():
+                mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_SHADOW, gridpos, self.viewport, t1, t2, self.context)
+
+
+    def capture_frame(self):
+        rgb = np.zeros((self.viewport.height, self.viewport.width, 3), dtype=np.uint8)
+        mujoco.mjr_readPixels(rgb, None, self.viewport, self.context)
+        return np.flipud(rgb)
+
+
+    def render_to_rgb(self, data):
+        self.create_overlay()
+        self._render_scene(data)
+        frame = self.capture_frame()
+        glfw.poll_events()
+        self.frames += 1
+        self.overlay.clear()
+        if glfw.window_should_close(self.window):
+            self.stop()
+            exit(0)
+        self.set_camera()
+        return frame
+
+
     def render(self, data):
         def render_inner_loop(self):
             self.create_overlay()
             render_start = time.time()
-
-            mujoco.mjv_updateScene(self.model, data, self.scene_option, None, self.camera,
-                                   mujoco.mjtCatBit.mjCAT_ALL,
-                                   self.scene)
-            self.viewport.width, self.viewport.height = glfw.get_framebuffer_size(self.window)
-            mujoco.mjr_render(self.viewport, self.scene, self.context)
-
-            if not self.hide_menu:
-                for gridpos, [t1, t2] in self.overlay.items():
-                    mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_SHADOW, gridpos, self.viewport, t1, t2, self.context)
+            self._render_scene(data)
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
@@ -158,14 +183,14 @@ class MujocoViewer:
         self.overlay[topleft][1] += "[S]lower, [F]aster"
 
     def set_camera(self):
-        if self.camera_mode_target == "static" and self.camera_mode != "static":
+        if self.camera_mode_target == "static":
                 self.camera.fixedcamid = 0
                 self.camera.type = mujoco.mjtCamera.mjCAMERA_FREE
                 self.camera.trackbodyid = -1
                 self.camera.distance = 15.0
                 self.camera.elevation = -45.0
                 self.camera.azimuth = 90.0
-        if self.camera_mode_target == "follow" and self.camera_mode != "follow":
+        if self.camera_mode_target == "follow":
                 self.camera.fixedcamid = -1
                 self.camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
                 self.camera.trackbodyid = 0
@@ -178,3 +203,4 @@ class MujocoViewer:
         self.model = model
         self.scene = mujoco.MjvScene(model, 1000)
         self.context = mujoco.MjrContext(model, mujoco.mjtFontScale(self.font_scale))
+        self.set_camera()

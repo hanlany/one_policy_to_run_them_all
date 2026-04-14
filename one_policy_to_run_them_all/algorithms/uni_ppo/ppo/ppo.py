@@ -1,3 +1,4 @@
+import math
 import os
 import psutil
 import logging
@@ -14,6 +15,8 @@ import orbax.checkpoint
 import optax
 import wandb
 import torch
+import cv2
+import mujoco
 import sys
 sys.path.append("/app/one_policy_to_run_them_all/student")
 try:
@@ -60,6 +63,83 @@ class PolicyStageController:
         return self.teacher_predict(policy_state, state, env_id)
 
 
+class VideoFrameWriter:
+    def __init__(self, output_path, fps, frame_width=None, frame_height=None):
+        self.output_path = output_path
+        self.fps = float(max(1, int(round(fps))))
+        self.frame_width = None if frame_width is None else int(frame_width)
+        self.frame_height = None if frame_height is None else int(frame_height)
+        self.writer = None
+        if self.frame_width is not None and self.frame_height is not None:
+            self._open_writer(self.frame_width, self.frame_height)
+
+    def _open_writer(self, frame_width, frame_height):
+        self.writer = cv2.VideoWriter(
+            self.output_path,
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            self.fps,
+            (int(frame_width), int(frame_height)),
+        )
+        if not self.writer.isOpened():
+            raise RuntimeError(f"Could not open video writer for {self.output_path}")
+        self.frame_width = int(frame_width)
+        self.frame_height = int(frame_height)
+
+    def write_rgb_frame(self, frame):
+        if frame is None:
+            raise RuntimeError("Cannot write an empty frame.")
+        if self.writer is None:
+            height, width = frame.shape[:2]
+            self._open_writer(width, height)
+        self.writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+    def close(self):
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+
+
+class OffscreenMujocoVideoRecorder:
+    def __init__(self, model, output_path, fps, width=1280, height=720):
+        self.output_path = output_path
+        self.video_writer = None
+        self.renderer = None
+        self.camera = mujoco.MjvCamera()
+
+        max_width = int(getattr(model.vis.global_, "offwidth", width))
+        max_height = int(getattr(model.vis.global_, "offheight", height))
+        safe_width = max(1, min(int(width), max_width))
+        safe_height = max(1, min(int(height), max_height))
+
+        # Keep the output inside MuJoCo's configured offscreen framebuffer limits.
+        self.renderer = mujoco.Renderer(model, height=safe_height, width=safe_width)
+        self.video_writer = VideoFrameWriter(output_path, fps=max(1, int(round(fps))), frame_width=safe_width, frame_height=safe_height)
+        self.set_follow_camera(model)
+
+    def set_follow_camera(self, model):
+        self.camera.fixedcamid = -1
+        self.camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+        self.camera.trackbodyid = 0
+        self.camera.distance = 3.5
+        self.camera.elevation = 0.0
+        self.camera.azimuth = 90.0
+
+    def capture(self, data):
+        if self.renderer is None or self.video_writer is None:
+            raise RuntimeError("Recorder is not initialized.")
+        self.renderer.update_scene(data, camera=self.camera)
+        self.video_writer.write_rgb_frame(self.renderer.render())
+
+    def close(self):
+        try:
+            if self.video_writer is not None:
+                self.video_writer.close()
+        finally:
+            close = getattr(self.renderer, "close", None)
+            if callable(close):
+                close()
+
+
 class PPO:
     def __init__(self, config, env, run_path, writer) -> None:
         self.config = config
@@ -99,6 +179,11 @@ class PPO:
         self.dagger_online = config.algorithm.dagger_online
         self.determine_fastest_cpu_for_gpu = config.algorithm.determine_fastest_cpu_for_gpu
         self.use_student = config.algorithm.use_student
+        self.record = getattr(config.algorithm, "record", False)
+        self.record_robot_index = int(getattr(config.algorithm, "record_robot_index", -1))
+        self.record_seconds = float(getattr(config.algorithm, "record_seconds", 10.0))
+        self.record_fps = int(getattr(config.algorithm, "record_fps", 60))
+        self.record_dir = getattr(config.algorithm, "record_dir", "/app/one_policy_to_run_them_all/experiments/videos")
         self.multi_render = config.environment.multi_render
         self.batch_size = config.environment.nr_envs * config.algorithm.nr_steps
         self.nr_updates = config.algorithm.total_timesteps // self.batch_size
@@ -263,6 +348,119 @@ class PPO:
             wandb.config["SLURM_JOB_ID"] = os.environ["SLURM_JOB_ID"]
 
     
+    def _sanitize_video_fragment(self, value):
+        return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(value))
+
+
+    def _build_recording_path(self, output_dir, stage_name, env_id, robot_type, timestamp):
+        safe_stage = self._sanitize_video_fragment(stage_name)
+        safe_robot_type = self._sanitize_video_fragment(robot_type)
+        file_name = f"{timestamp}_{safe_stage}_env{env_id:02d}_{safe_robot_type}.mp4"
+        return os.path.join(output_dir, file_name)
+
+
+    def _get_record_env_ids(self, total_envs):
+        if self.record_robot_index < 0:
+            return list(range(total_envs))
+        env_id = int(self.record_robot_index)
+        if env_id < 0 or env_id >= total_envs:
+            raise ValueError(f"record_robot_index {env_id} is out of range for {total_envs} envs.")
+        return [env_id]
+
+
+    def _get_record_timing(self, dt):
+        dt = float(dt)
+        if dt <= 0:
+            raise ValueError(f"Invalid environment dt for recording: {dt}")
+        fps = max(1, int(round(1.0 / dt)))
+        total_frames = max(1, int(round(self.record_seconds * fps)))
+        return fps, total_frames
+
+
+    def _record_vectorized_policy_videos(self, behavior_action_fn, stage_name):
+        os.makedirs(self.record_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        models = self.env.call("model")
+        dt_values = self.env.call("dt")
+        robot_types = self.env.call("robot_type")
+        output_paths = []
+        record_env_ids = self._get_record_env_ids(len(models))
+
+        for env_id in record_env_ids:
+            model = models[env_id]
+            dt = dt_values[env_id]
+            robot_type = robot_types[env_id]
+            record_fps, total_frames = self._get_record_timing(dt)
+            output_path = self._build_recording_path(self.record_dir, stage_name, env_id, robot_type, timestamp)
+            output_paths.append(output_path)
+            recorder = OffscreenMujocoVideoRecorder(model, output_path, fps=record_fps)
+            try:
+                state, _ = self.env.reset()
+                data_handles = self.env.call("data")
+                recorder.capture(data_handles[env_id])
+                for _ in range(total_frames - 1):
+                    processed_action = behavior_action_fn(state)
+                    state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                    data_handles = self.env.call("data")
+                    recorder.capture(data_handles[env_id])
+            finally:
+                recorder.close()
+
+        return output_paths
+
+
+    def _record_multi_render_policy_videos(self, behavior_action_fn, stage_name):
+        os.makedirs(self.record_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        render_wrapper = getattr(self.env, "env", None)
+        viewer = getattr(render_wrapper, "viewer", None)
+        if viewer is None:
+            raise RuntimeError("Multi-render recording requires the MultiRenderWrapper viewer.")
+
+        base_env = self.env.unwrapped
+        models = base_env.call("model")
+        dt_values = base_env.call("dt")
+        robot_types = base_env.call("robot_type")
+        output_paths = []
+        record_env_ids = self._get_record_env_ids(len(models))
+        original_active_env_id = getattr(base_env, "active_env_id", 0)
+        original_env_to_render = getattr(render_wrapper, "env_to_render", original_active_env_id)
+
+        try:
+            for env_id in record_env_ids:
+                model = models[env_id]
+                dt = dt_values[env_id]
+                robot_type = robot_types[env_id]
+                record_fps, total_frames = self._get_record_timing(dt)
+                output_path = self._build_recording_path(self.record_dir, stage_name, env_id, robot_type, timestamp)
+                output_paths.append(output_path)
+                writer = VideoFrameWriter(output_path, fps=record_fps)
+                try:
+                    base_env.active_env_id = env_id
+                    render_wrapper.env_to_render = env_id
+                    viewer.load_new_model(model)
+                    state, _ = base_env.reset()
+                    writer.write_rgb_frame(viewer.render_to_rgb(base_env.call("data")[env_id]))
+                    for _ in range(total_frames - 1):
+                        processed_action = behavior_action_fn(state, env_id_override=env_id)
+                        state, reward, terminated, truncated, info = base_env.step(jax.device_get(processed_action))
+                        writer.write_rgb_frame(viewer.render_to_rgb(base_env.call("data")[env_id]))
+                finally:
+                    writer.close()
+        finally:
+            base_env.active_env_id = original_active_env_id
+            render_wrapper.env_to_render = original_env_to_render
+            if models:
+                viewer.load_new_model(models[original_active_env_id])
+
+        return output_paths
+
+
+    def _record_policy_videos(self, behavior_action_fn, stage_name):
+        if self.multi_render:
+            return self._record_multi_render_policy_videos(behavior_action_fn, stage_name)
+        return self._record_vectorized_policy_videos(behavior_action_fn, stage_name)
+
     def train(self):
         @jax.jit
         def train_loop():
@@ -816,6 +1014,11 @@ class PPO:
             "snn_timesteps",
             "snn_convert_every_iteration",
             "snn_export_dir",
+            "record",
+            "record_robot_index",
+            "record_seconds",
+            "record_dir",
+            "record_fps",
         ):
             if key in algorithm_dict:
                 del algorithm_dict[key]
@@ -905,6 +1108,11 @@ class PPO:
         snn_timesteps = getattr(algorithm_config, "snn_timesteps", 10)
         snn_convert_every_iteration = getattr(algorithm_config, "snn_convert_every_iteration", True)
         snn_export_dir = getattr(algorithm_config, "snn_export_dir", os.path.join(student_checkpoint_dir, "snn_exports"))
+        record_enabled = getattr(algorithm_config, "record", self.record)
+        self.record_robot_index = int(getattr(algorithm_config, "record_robot_index", self.record_robot_index))
+        self.record_seconds = float(getattr(algorithm_config, "record_seconds", self.record_seconds))
+        self.record_fps = int(getattr(algorithm_config, "record_fps", self.record_fps))
+        self.record_dir = getattr(algorithm_config, "record_dir", self.record_dir)
 
         pipeline = PolicyDistillationPipeline(
             input_dim=self.os_shape[0],
@@ -937,8 +1145,9 @@ class PPO:
         def current_env_id():
             return self.env.active_env_id if self.multi_render else None
 
-        def get_behavior_action(state):
-            return controller.predict(self.policy_state, state, env_id=current_env_id(), role="behavior")
+        def get_behavior_action(state, env_id_override=None):
+            env_id = current_env_id() if env_id_override is None else env_id_override
+            return controller.predict(self.policy_state, state, env_id=env_id, role="behavior")
 
         def get_teacher_label_action(state):
             return controller.predict(self.policy_state, state, env_id=current_env_id(), role="teacher_label")
@@ -979,6 +1188,13 @@ class PPO:
                     controller.set_stage("snn")
             else:
                 controller.set_stage("teacher")
+
+        if record_enabled:
+            output_paths = self._record_policy_videos(get_behavior_action, controller.stage)
+            for output_path in output_paths:
+                rlx_logger.info(f"Saved recording to {output_path}")
+            print(f"Recording finished. Saved {len(output_paths)} video(s) to {self.record_dir} with simulation-synced timing.")
+            return
 
         if self.dagger_online:
             rlx_logger.info(f"Starting DAgger online training for {self.dagger_online} iterations")

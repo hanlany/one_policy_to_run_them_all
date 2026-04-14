@@ -14,3 +14,4 @@ experiments/*.sh
 bash_history
 *.pth
 *.npz
+*.mp4

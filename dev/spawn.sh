@@ -14,10 +14,10 @@ docker run -it \
     --name=lavaurma_dev \
     --network=host \
     --gpus all \
-    -v ./../one_policy_to_run_them_all:/app/one_policy_to_run_them_all \
-    -v ./../RL-X:/app/RL-X \
-    -v ./../GenLoco:/app/GenLoco \
-    -v ./../genloco-loihi:/app/genloco-loihi \
+    -v ./../../one_policy_to_run_them_all:/app/one_policy_to_run_them_all \
+    -v ./../../RL-X:/app/RL-X \
+    -v ./../../GenLoco:/app/GenLoco \
+    -v ./../../genloco-loihi:/app/genloco-loihi \
     lavaurma \
     bash
 

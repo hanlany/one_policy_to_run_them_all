@@ -18,10 +18,24 @@ try:
 except ImportError:
     lava_conversion = None
 
+try:
+    from bootstrap_backend import (
+        BootstrapEvaluationArtifacts,
+        BootstrapPolicyPipeline,
+        BootstrapTrainingConfig,
+        BootstrapStudentPolicy,
+    )
+except ImportError:
+    BootstrapEvaluationArtifacts = None
+    BootstrapPolicyPipeline = None
+    BootstrapTrainingConfig = None
+    BootstrapStudentPolicy = None
+
 TensorLike = Union[np.ndarray, torch.Tensor]
 DEFAULT_HIDDEN_DIMS = [1024, 1024, 1024, 1024, 1024]
 SUPPORTED_SNN_READOUTS = ("mean", "last", "sum")
 SUPPORTED_SNN_OUTPUT_ACTIVATIONS = ("sigma", "sdrelu", "delta")
+SUPPORTED_STUDENT_BACKENDS = ("ann", "bootstrap")
 DEFAULT_SNN_THRESHOLD = 0.2
 DEFAULT_SNN_TIMESTEPS = 3
 CONVERSION_TARGET_HIDDEN_DIMS = [
@@ -46,6 +60,7 @@ SNN_MEAN_PERCENTAGE_ERROR_LIMIT = 30.0
 @dataclass
 class StudentTrainingConfig:
     dataset_path: str = "teacher_student_dagger_dataset.npz"
+    backend: str = "ann"
     batch_size: int = 64
     learning_rate: float = 1e-3
     epochs: int = 50
@@ -268,6 +283,18 @@ def compute_snn_quality_threshold(student_mean_percentage_error: float) -> float
         float(SNN_MEAN_PERCENTAGE_ERROR_LIMIT),
         float(student_mean_percentage_error) * float(SNN_TEACHER_ERROR_RATIO_LIMIT),
     )
+
+
+def _ensure_supported_backend(backend: str):
+    if backend not in SUPPORTED_STUDENT_BACKENDS:
+        raise ValueError(f"Unsupported student backend '{backend}'. Supported backends: {SUPPORTED_STUDENT_BACKENDS}")
+
+
+def _get_selected_readout(model) -> str:
+    conversion_config = getattr(model, "conversion_config", None)
+    if conversion_config is not None and getattr(conversion_config, "readout", None) is not None:
+        return conversion_config.readout
+    return getattr(model, "readout", "mean")
 
 
 def collect_student_activation_stats(
@@ -731,7 +758,7 @@ def evaluate_ann_snn_parity(
             "output_scale_ratio": values["output_abs_sum"] / (ann_abs_sum + 1e-8),
         }
 
-    selected_readout = snn_model.conversion_config.readout
+    selected_readout = _get_selected_readout(snn_model)
     selected_metrics = readout_metrics[selected_readout]
     return {
         "selected_readout": selected_readout,
@@ -789,46 +816,87 @@ class PolicyDistillationPipeline:
         student_hidden_dims: Optional[Sequence[int]] = None,
         training_config: Optional[StudentTrainingConfig] = None,
         snn_config: Optional[SNNConversionConfig] = None,
+        bootstrap_config: Optional[BootstrapTrainingConfig] = None,
         device: Optional[Union[str, torch.device]] = None,
     ):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.training_config = training_config or StudentTrainingConfig(hidden_dims=list(student_hidden_dims or DEFAULT_HIDDEN_DIMS))
+        _ensure_supported_backend(self.training_config.backend)
         if student_hidden_dims is not None:
             self.training_config.hidden_dims = list(student_hidden_dims)
+        self.backend = self.training_config.backend
         self.snn_config = snn_config or SNNConversionConfig(device=str(self.device))
         if self.snn_config.device is None:
             self.snn_config.device = str(self.device)
 
         self.checkpoint_manager = StudentCheckpointManager(self.training_config.checkpoint_dir)
-        self.student_trainer = StudentTrainer(
-            config=self.training_config,
-            device=self.device,
-            checkpoint_manager=self.checkpoint_manager,
-        )
-        self.student_model: Optional[StudentPolicy] = None
-        self.snn_policy: Optional[SNNPolicy] = None
+        self.student_trainer = None
+        self.bootstrap_pipeline = None
+        self.student_model = None
+        self.snn_policy = None
 
-    def build_student_policy(self) -> StudentPolicy:
-        self.student_model = StudentPolicy(
-            input_dim=self.input_dim,
-            output_dim=self.output_dim,
-            hidden_dims=self.training_config.hidden_dims,
-        ).to(self.device)
+        if self.backend == "bootstrap":
+            if BootstrapPolicyPipeline is None or BootstrapTrainingConfig is None:
+                raise ImportError("bootstrap_backend is required for the bootstrap student backend.")
+            self.bootstrap_config = bootstrap_config or BootstrapTrainingConfig(
+                dataset_path=self.training_config.dataset_path,
+                batch_size=self.training_config.batch_size,
+                learning_rate=self.training_config.learning_rate,
+                epochs=self.training_config.epochs,
+                hidden_dims=list(self.training_config.hidden_dims),
+                val_split=self.training_config.val_split,
+                num_workers=self.training_config.num_workers,
+                checkpoint_dir=self.training_config.checkpoint_dir,
+                best_checkpoint_name=self.training_config.best_checkpoint_name,
+                latest_checkpoint_name=self.training_config.latest_checkpoint_name,
+                iteration_checkpoint_template=self.training_config.iteration_checkpoint_template,
+            )
+            self.bootstrap_pipeline = BootstrapPolicyPipeline(
+                input_dim=self.input_dim,
+                output_dim=self.output_dim,
+                hidden_dims=self.training_config.hidden_dims,
+                training_config=self.bootstrap_config,
+                device=self.device,
+            )
+        else:
+            self.bootstrap_config = bootstrap_config
+            self.student_trainer = StudentTrainer(
+                config=self.training_config,
+                device=self.device,
+                checkpoint_manager=self.checkpoint_manager,
+            )
+
+    def build_student_policy(self):
+        if self.backend == "bootstrap":
+            self.student_model = self.bootstrap_pipeline.build_student_policy()
+        else:
+            self.student_model = StudentPolicy(
+                input_dim=self.input_dim,
+                output_dim=self.output_dim,
+                hidden_dims=self.training_config.hidden_dims,
+            ).to(self.device)
         return self.student_model
 
-    def load_student_policy(self, checkpoint_path: Union[str, Path]) -> StudentPolicy:
-        self.student_model = self.checkpoint_manager.load(
-            checkpoint_path=checkpoint_path,
-            device=self.device,
-            input_dim=self.input_dim,
-            output_dim=self.output_dim,
-            hidden_dims=self.training_config.hidden_dims,
-        )
+    def load_student_policy(self, checkpoint_path: Union[str, Path]):
+        if self.backend == "bootstrap":
+            self.student_model = self.bootstrap_pipeline.load_student_policy(checkpoint_path)
+        else:
+            self.student_model = self.checkpoint_manager.load(
+                checkpoint_path=checkpoint_path,
+                device=self.device,
+                input_dim=self.input_dim,
+                output_dim=self.output_dim,
+                hidden_dims=self.training_config.hidden_dims,
+            )
         return self.student_model
 
     def train_offline(self, dataset_path: Optional[Union[str, Path]] = None) -> TrainingArtifacts:
+        if self.backend == "bootstrap":
+            artifacts = self.bootstrap_pipeline.train_offline(dataset_path=dataset_path)
+            self.student_model = self.bootstrap_pipeline.bootstrap_model
+            return artifacts
         artifacts = self.student_trainer.train(dataset_path=dataset_path, initial_model=self.student_model)
         self.student_model = self.student_trainer.model
         return artifacts
@@ -839,6 +907,10 @@ class PolicyDistillationPipeline:
         actions: TensorLike,
         iteration: Optional[int] = None,
     ) -> TrainingArtifacts:
+        if self.backend == "bootstrap":
+            artifacts = self.bootstrap_pipeline.train_on_aggregated_data(states=states, actions=actions, iteration=iteration)
+            self.student_model = self.bootstrap_pipeline.bootstrap_model
+            return artifacts
         artifacts = self.student_trainer.train_on_arrays(
             states=states,
             actions=actions,
@@ -851,8 +923,16 @@ class PolicyDistillationPipeline:
     def build_snn_policy(
         self,
         student_checkpoint_path: Optional[Union[str, Path]] = None,
-        student_model: Optional[StudentPolicy] = None,
-    ) -> SNNPolicy:
+        student_model: Optional[Union[StudentPolicy, BootstrapStudentPolicy]] = None,
+    ):
+        if self.backend == "bootstrap":
+            self.snn_policy = self.bootstrap_pipeline.build_snn_policy(
+                student_checkpoint_path=student_checkpoint_path,
+                student_model=student_model,
+            )
+            self.student_model = self.bootstrap_pipeline.bootstrap_model
+            return self.snn_policy
+
         if student_model is None:
             if student_checkpoint_path is not None:
                 student_model = self.load_student_policy(student_checkpoint_path)
@@ -873,7 +953,7 @@ class PolicyDistillationPipeline:
             states=states,
             batch_size=batch_size,
             device=self.device,
-            calibration_samples=self.snn_config.calibration_samples,
+            calibration_samples=self.snn_config.calibration_samples if self.backend != "bootstrap" else None,
         )
 
     def evaluate_against_teacher(
@@ -891,12 +971,14 @@ class PolicyDistillationPipeline:
             teacher_actions=teacher_actions,
             batch_size=batch_size,
             device=self.device,
-            readout=self.snn_config.readout,
+            readout=self.snn_config.readout if self.backend != "bootstrap" else self.bootstrap_config.readout,
         )
 
     def predict_student(self, states: TensorLike) -> np.ndarray:
         if self.student_model is None:
             raise RuntimeError("Student policy has not been initialized.")
+        if self.backend == "bootstrap":
+            return self.bootstrap_pipeline.predict_student(states)
 
         self.student_model.eval()
         state_tensor = torch.as_tensor(states, dtype=torch.float32, device=self.device)
@@ -906,8 +988,9 @@ class PolicyDistillationPipeline:
     def predict_snn(self, states: TensorLike, readout: Optional[str] = None) -> np.ndarray:
         if self.snn_policy is None:
             raise RuntimeError("SNN policy has not been initialized.")
+        if self.backend == "bootstrap":
+            return self.bootstrap_pipeline.predict_snn(states, readout=readout)
         return self.snn_policy.predict(states, readout=readout)
-
 
 def search_conversion_target_students(
     dataset_path: Union[str, Path],

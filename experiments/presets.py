@@ -26,11 +26,19 @@ D300K_STUDENT_MODEL_PATH = (
     "conversion_target_search_d300k/1024x1024x1024x1024x1024/student_model_best.pth"
 )
 ONLINE_DAGGER_SNN_DIR = "/app/one_policy_to_run_them_all/experiments/teacher-student/online_dagger_snn"
+BOOTSTRAP_MODEL_PATH = "/app/one_policy_to_run_them_all/experiments/teacher-student/bootstrap_parity/student_model_best.pth"
+ONLINE_DAGGER_BOOTSTRAP_DIR = "/app/one_policy_to_run_them_all/experiments/teacher-student/online_dagger_bootstrap"
 
 DEFAULT_SNN_OVERRIDES = {
     "algorithm.snn_enabled": True,
     "algorithm.rollout_policy_stage": "snn",
     "algorithm.snn_threshold": 0.2,
+}
+
+DEFAULT_BOOTSTRAP_OVERRIDES = {
+    "algorithm.student_backend": "bootstrap",
+    "algorithm.bootstrap_timesteps": 3,
+    "algorithm.bootstrap_readout": "mean",
 }
 
 DEFAULT_RECORD_OVERRIDES = {
@@ -96,6 +104,31 @@ def build_snn_test_preset(student_model_path, *, snn_timesteps, multi_render=Tru
     return build_preset(**overrides)
 
 
+def build_bootstrap_student_test_preset(student_model_path, *, multi_render=True, record=False):
+    overrides = {
+        "environment.multi_render": multi_render,
+        "algorithm.use_student": True,
+        "algorithm.student_model_path": student_model_path,
+        **DEFAULT_BOOTSTRAP_OVERRIDES,
+    }
+    if record:
+        overrides.update(DEFAULT_RECORD_OVERRIDES)
+    return build_preset(**overrides)
+
+
+def build_bootstrap_snn_test_preset(student_model_path, *, bootstrap_timesteps, multi_render=True, record=False):
+    overrides = {
+        "environment.multi_render": multi_render,
+        "algorithm.student_model_path": student_model_path,
+        "algorithm.rollout_policy_stage": "snn",
+        "algorithm.bootstrap_timesteps": bootstrap_timesteps,
+        **DEFAULT_BOOTSTRAP_OVERRIDES,
+    }
+    if record:
+        overrides.update(DEFAULT_RECORD_OVERRIDES)
+    return build_preset(**overrides)
+
+
 PRESETS = {
     "collect_data_dagger": build_preset(
         **{
@@ -128,10 +161,34 @@ PRESETS = {
             **DEFAULT_SNN_OVERRIDES,
         },
     ),
+    "train_dagger_bootstrap": build_preset(
+        **{
+            "environment.multi_render": False,
+            "algorithm.data_points": 20000,
+            "algorithm.dagger_online": 50,
+            "algorithm.student_model_path": BOOTSTRAP_MODEL_PATH,
+            "algorithm.student_checkpoint_dir": ONLINE_DAGGER_BOOTSTRAP_DIR,
+            "algorithm.student_dataset_path": f"{ONLINE_DAGGER_BOOTSTRAP_DIR}/teacher_student_dagger_dataset.npz",
+            **DEFAULT_BOOTSTRAP_OVERRIDES,
+        },
+    ),
     "test_student": build_student_test_preset(STUDENT_MODEL_PATH),
     "test_snn": build_snn_test_preset(STUDENT_MODEL_PATH, snn_timesteps=5),
     "test_student_d300k": build_student_test_preset(D300K_STUDENT_MODEL_PATH),
     "test_snn_d300k": build_snn_test_preset(D300K_STUDENT_MODEL_PATH, snn_timesteps=3),
+    "test_bootstrap_student": build_bootstrap_student_test_preset(BOOTSTRAP_MODEL_PATH),
+    "test_bootstrap_snn": build_bootstrap_snn_test_preset(BOOTSTRAP_MODEL_PATH, bootstrap_timesteps=3),
+    "record_bootstrap_student": build_bootstrap_student_test_preset(
+        BOOTSTRAP_MODEL_PATH,
+        multi_render=True,
+        record=True,
+    ),
+    "record_bootstrap_snn": build_bootstrap_snn_test_preset(
+        BOOTSTRAP_MODEL_PATH,
+        bootstrap_timesteps=3,
+        multi_render=True,
+        record=True,
+    ),
     "record_student_d300k": build_student_test_preset(
         D300K_STUDENT_MODEL_PATH,
         multi_render=True,

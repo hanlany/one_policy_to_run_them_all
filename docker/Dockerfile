@@ -21,7 +21,9 @@ RUN apt-get update && \
         libglvnd0 \
         libopenmpi-dev \
         mesa-utils \
+        ninja-build \
         python3 \
+        python3-dev \
         python3-pip \
         vim && \
     rm -rf /var/lib/apt/lists/*

@@ -25,6 +25,7 @@ try:
         PolicyDistillationPipeline,
         SNNConversionConfig,
         StudentTrainingConfig,
+        BootstrapTrainingConfig,
     )
 except ImportError:
     print("Could not import student distillation utilities. Make sure train_student.py is in the path.")
@@ -1004,7 +1005,18 @@ class PPO:
             "student_checkpoint_dir",
             "student_dataset_path",
             "student_hidden_dims",
+            "student_backend",
             "student_batch_size",
+            "bootstrap_timesteps",
+            "bootstrap_readout",
+            "bootstrap_num_sample_iter",
+            "bootstrap_sample_period",
+            "bootstrap_crossover_epochs",
+            "bootstrap_neuron_threshold",
+            "bootstrap_current_decay",
+            "bootstrap_voltage_decay",
+            "bootstrap_weight_scale",
+            "bootstrap_weight_norm",
             "student_learning_rate",
             "student_train_epochs",
             "student_num_workers",
@@ -1102,6 +1114,7 @@ class PPO:
         student_model_path = getattr(algorithm_config, "student_model_path", os.path.join(student_checkpoint_dir, "student_model_best.pth"))
         student_dataset_path = getattr(algorithm_config, "student_dataset_path", os.path.join(student_checkpoint_dir, "teacher_student_dagger_dataset.npz"))
         student_hidden_dims = list(getattr(algorithm_config, "student_hidden_dims", DEFAULT_HIDDEN_DIMS))
+        student_backend = getattr(algorithm_config, "student_backend", "ann")
         rollout_policy_stage = getattr(algorithm_config, "rollout_policy_stage", "student")
         snn_enabled = getattr(algorithm_config, "snn_enabled", False)
         snn_threshold = getattr(algorithm_config, "snn_threshold", 0.1)
@@ -1120,6 +1133,7 @@ class PPO:
             student_hidden_dims=student_hidden_dims,
             training_config=StudentTrainingConfig(
                 dataset_path=student_dataset_path,
+                backend=student_backend,
                 batch_size=getattr(algorithm_config, "student_batch_size", 64),
                 learning_rate=getattr(algorithm_config, "student_learning_rate", 1e-4),
                 epochs=getattr(algorithm_config, "student_train_epochs", 60),
@@ -1132,6 +1146,27 @@ class PPO:
                 threshold=snn_threshold,
                 timesteps=snn_timesteps,
                 export_dir=snn_export_dir,
+            ),
+            bootstrap_config=BootstrapTrainingConfig(
+                dataset_path=student_dataset_path,
+                batch_size=getattr(algorithm_config, "student_batch_size", 64),
+                learning_rate=getattr(algorithm_config, "student_learning_rate", 1e-4),
+                epochs=getattr(algorithm_config, "student_train_epochs", 60),
+                hidden_dims=student_hidden_dims,
+                num_workers=getattr(algorithm_config, "student_num_workers", 0),
+                checkpoint_dir=student_checkpoint_dir,
+                best_checkpoint_name=os.path.basename(student_model_path),
+                latest_checkpoint_name=os.path.basename(student_model_path).replace("best", "latest"),
+                timesteps=getattr(algorithm_config, "bootstrap_timesteps", 3),
+                readout=getattr(algorithm_config, "bootstrap_readout", "mean"),
+                num_sample_iter=getattr(algorithm_config, "bootstrap_num_sample_iter", 10),
+                sample_period=getattr(algorithm_config, "bootstrap_sample_period", 10),
+                crossover_epochs=tuple(getattr(algorithm_config, "bootstrap_crossover_epochs", ())),
+                neuron_threshold=getattr(algorithm_config, "bootstrap_neuron_threshold", 1.0),
+                current_decay=getattr(algorithm_config, "bootstrap_current_decay", 0.25),
+                voltage_decay=getattr(algorithm_config, "bootstrap_voltage_decay", 0.03),
+                weight_scale=getattr(algorithm_config, "bootstrap_weight_scale", 1.0),
+                weight_norm=getattr(algorithm_config, "bootstrap_weight_norm", False),
             ),
         )
 
@@ -1163,7 +1198,7 @@ class PPO:
             return True
 
         def build_snn_artifact(export_name=None):
-            if not snn_enabled:
+            if student_backend != "bootstrap" and not snn_enabled:
                 return False
             try:
                 pipeline.build_snn_policy(student_model=pipeline.student_model)
@@ -1171,6 +1206,11 @@ class PPO:
             except Exception as exc:
                 rlx_logger.warning(f"Could not build SNN policy: {exc}")
                 return False
+
+            if student_backend == "bootstrap":
+                if export_name and snn_export_dir:
+                    rlx_logger.info("Bootstrap backend does not export HDF5 artifacts; skipping export.")
+                return True
 
             if export_name and snn_export_dir:
                 try:

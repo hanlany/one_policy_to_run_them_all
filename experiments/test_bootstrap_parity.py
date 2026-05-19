@@ -11,6 +11,7 @@ from bootstrap_backend import (
     resolve_bootstrap_device,
     BootstrapTrainingConfig,
     BootstrapStudentTrainer,
+    collect_bootstrap_activity_stats,
     evaluate_ann_bootstrap_parity,
     evaluate_bootstrap_against_teacher,
     load_teacher_dataset,
@@ -41,7 +42,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--bootstrap-batch-size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="cuda")
     parser.add_argument("--bootstrap-timesteps", type=int, default=3)
     parser.add_argument("--bootstrap-readout", default="mean")
     parser.add_argument("--bootstrap-num-sample-iter", type=int, default=10)
@@ -52,6 +53,9 @@ def main():
     parser.add_argument("--bootstrap-voltage-decay", type=float, default=0.03)
     parser.add_argument("--bootstrap-weight-scale", type=float, default=1.0)
     parser.add_argument("--bootstrap-weight-norm", action="store_true")
+    parser.add_argument("--bootstrap-input-strategy", default="signed_split")
+    parser.add_argument("--bootstrap-input-weight", type=float, default=1.0)
+    parser.add_argument("--bootstrap-input-bias", type=float, default=0.0)
     parser.add_argument("--no-bootstrap-init-from-ann", action="store_true")
     parser.add_argument("--conversion-threshold", type=float, default=0.2)
     parser.add_argument("--conversion-timesteps", type=int, default=3)
@@ -114,6 +118,9 @@ def main():
         voltage_decay=args.bootstrap_voltage_decay,
         weight_scale=args.bootstrap_weight_scale,
         weight_norm=args.bootstrap_weight_norm,
+        input_strategy=args.bootstrap_input_strategy,
+        input_weight=args.bootstrap_input_weight,
+        input_bias=args.bootstrap_input_bias,
         initialize_from_ann=not args.no_bootstrap_init_from_ann,
     )
     trainer = BootstrapStudentTrainer(config=bootstrap_config, device=device)
@@ -136,6 +143,11 @@ def main():
         states=eval_states,
         teacher_actions=eval_actions,
         batch_size=args.batch_size,
+        device=device,
+    )
+    bootstrap_activity = collect_bootstrap_activity_stats(
+        bootstrap_model=bootstrap_model,
+        states=eval_states[: min(len(eval_states), args.batch_size)],
         device=device,
     )
 
@@ -173,10 +185,14 @@ def main():
                 "voltage_decay": float(args.bootstrap_voltage_decay),
                 "weight_scale": float(args.bootstrap_weight_scale),
                 "weight_norm": bool(args.bootstrap_weight_norm),
+                "input_strategy": args.bootstrap_input_strategy,
+                "input_weight": float(args.bootstrap_input_weight),
+                "input_bias": float(args.bootstrap_input_bias),
                 "initialized_from_ann": not args.no_bootstrap_init_from_ann,
             },
             "parity": bootstrap_parity,
             "teacher": bootstrap_teacher,
+            "activity": bootstrap_activity,
             "best_val_loss": float(artifacts.best_val_loss),
         },
         "bootstrap_beats_conversion_baseline": bool(beats_conversion_baseline),

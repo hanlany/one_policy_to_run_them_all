@@ -30,17 +30,24 @@ _BOOTSTRAP_DEVICE_WARNING_EMITTED = False
 def resolve_bootstrap_device(device: Optional[Union[str, torch.device]] = None) -> torch.device:
     global _BOOTSTRAP_DEVICE_WARNING_EMITTED
     requested = torch.device(device or "cpu")
-    if requested.type == "cuda":
-        if not _BOOTSTRAP_DEVICE_WARNING_EMITTED:
-            warnings.warn(
-                "Bootstrap requested CUDA, but this environment cannot build Lava's CUDA extension path. Falling back to CPU. "
-                "Rebuild the Docker image with Python development headers to enable CUDA bootstrap.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            _BOOTSTRAP_DEVICE_WARNING_EMITTED = True
-        return torch.device("cpu")
-    return requested
+    if requested.type != "cuda":
+        return requested
+
+    python_header = Path("/usr/include/python3.10/Python.h")
+    ninja_path = Path("/usr/local/bin/ninja")
+    cuda_ready = torch.cuda.is_available() and python_header.exists() and ninja_path.exists()
+    if cuda_ready:
+        return requested
+
+    if not _BOOTSTRAP_DEVICE_WARNING_EMITTED:
+        warnings.warn(
+            "Bootstrap requested CUDA, but this environment cannot build Lava's CUDA extension path. Falling back to CPU. "
+            "Install Python development headers and ninja in the image to enable CUDA bootstrap.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        _BOOTSTRAP_DEVICE_WARNING_EMITTED = True
+    return torch.device("cpu")
 
 
 @dataclass
@@ -56,6 +63,9 @@ class TrainingArtifacts:
 @dataclass
 class BootstrapTrainingConfig:
     dataset_path: str = "teacher_student_dagger_dataset.npz"
+    input_strategy: str = "signed_split"
+    input_weight: float = 1.0
+    input_bias: float = 0.0
     batch_size: int = 64
     learning_rate: float = 1e-4
     epochs: int = 60
@@ -155,6 +165,9 @@ class BootstrapCheckpointManager:
         torch.save(payload, path)
 
 
+SUPPORTED_BOOTSTRAP_INPUT_STRATEGIES = ("identity", "signed_split")
+
+
 class BootstrapStudentPolicy(nn.Module):
     def __init__(
         self,
@@ -168,6 +181,9 @@ class BootstrapStudentPolicy(nn.Module):
         voltage_decay: float = DEFAULT_BOOTSTRAP_VOLTAGE_DECAY,
         weight_scale: float = 1.0,
         weight_norm: bool = False,
+        input_strategy: str = "signed_split",
+        input_weight: float = 1.0,
+        input_bias: float = 0.0,
     ):
         super().__init__()
         if lava_bootstrap_block is None or lava_bootstrap_routine is None:
@@ -185,6 +201,12 @@ class BootstrapStudentPolicy(nn.Module):
         self.voltage_decay = float(voltage_decay)
         self.weight_scale = float(weight_scale)
         self.weight_norm = bool(weight_norm)
+        self.input_strategy = input_strategy
+        self.input_weight = float(input_weight)
+        self.input_bias = float(input_bias)
+        if self.input_strategy not in SUPPORTED_BOOTSTRAP_INPUT_STRATEGIES:
+            raise ValueError(f"Unsupported bootstrap input strategy '{self.input_strategy}'. Supported strategies: {SUPPORTED_BOOTSTRAP_INPUT_STRATEGIES}")
+        self.encoded_input_dim = self.input_dim * 2 if self.input_strategy == "signed_split" else self.input_dim
 
         neuron_params = {
             "threshold": self.neuron_threshold,
@@ -195,8 +217,8 @@ class BootstrapStudentPolicy(nn.Module):
             "requires_grad": False,
         }
 
-        blocks = [lava_bootstrap_block.cuba.Input(neuron_params=dict(neuron_params), delay_shift=False), lava_bootstrap_block.cuba.Flatten()]
-        prev_dim = self.input_dim
+        blocks = [lava_bootstrap_block.cuba.Input(neuron_params=dict(neuron_params), weight=self.input_weight, bias=self.input_bias, delay_shift=False), lava_bootstrap_block.cuba.Flatten()]
+        prev_dim = self.encoded_input_dim
         for hidden_dim in self.hidden_dims:
             blocks.append(
                 lava_bootstrap_block.cuba.Dense(
@@ -237,6 +259,9 @@ class BootstrapStudentPolicy(nn.Module):
             "voltage_decay": float(self.voltage_decay),
             "weight_scale": float(self.weight_scale),
             "weight_norm": bool(self.weight_norm),
+            "input_strategy": self.input_strategy,
+            "input_weight": float(self.input_weight),
+            "input_bias": float(self.input_bias),
             "backend": "bootstrap",
         }
 
@@ -251,17 +276,28 @@ class BootstrapStudentPolicy(nn.Module):
             raise ValueError(
                 f"Cannot initialize bootstrap model from ANN: {len(linear_layers)} ANN layers != {len(bootstrap_layers)} bootstrap layers."
             )
-        for ann_layer, bootstrap_layer in zip(linear_layers, bootstrap_layers):
+        for layer_index, (ann_layer, bootstrap_layer) in enumerate(zip(linear_layers, bootstrap_layers)):
             weight = ann_layer.weight.detach().to(bootstrap_layer.synapse.weight.device, dtype=bootstrap_layer.synapse.weight.dtype)
-            weight = weight.reshape(ann_layer.out_features, ann_layer.in_features, 1, 1, 1)
+            if layer_index == 0 and self.input_strategy == "signed_split":
+                weight = torch.cat([weight, -weight], dim=1)
+            weight = weight.reshape(ann_layer.out_features, weight.shape[1], 1, 1, 1)
             bootstrap_layer.synapse.weight.data.copy_(weight)
         self.eval()
         return self
+
+    def _transform_observation(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self.input_strategy == "identity":
+            return tensor
+        positive = torch.relu(tensor)
+        negative = torch.relu(-tensor)
+        return torch.cat([positive, negative], dim=1)
 
     def encode_input(self, states: TensorLike) -> torch.Tensor:
         tensor = torch.as_tensor(states, dtype=torch.float32, device=self.device)
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(0)
+        if tensor.ndim == 2:
+            tensor = self._transform_observation(tensor)
         if tensor.ndim == 2:
             tensor = tensor.unsqueeze(-1).unsqueeze(-1)
         if tensor.ndim == 4:
@@ -338,6 +374,37 @@ class BootstrapStudentTrainer:
         self.criterion = nn.MSELoss()
         self.model: Optional[BootstrapStudentPolicy] = None
 
+    def _samplers_ready(self) -> bool:
+        if self.model is None:
+            return False
+        ready = True
+        for block in self.model.blocks:
+            sampler = getattr(block, "f", None)
+            if sampler is None:
+                continue
+            if getattr(sampler, "centers", None) is None:
+                ready = False
+                break
+        return ready
+
+    def _fit_available_samplers(self):
+        if self.model is None:
+            return
+        for block in self.model.blocks:
+            sampler = getattr(block, "f", None)
+            if sampler is None:
+                continue
+            if len(getattr(sampler, "z", [])) == 0:
+                continue
+            block.fit()
+
+    def _warmup_samplers(self, states: torch.Tensor):
+        if self.model is None or self._samplers_ready():
+            return
+        with torch.no_grad():
+            _ = self.model(states, mode=lava_bootstrap_routine.Mode.SAMPLE, readout=self.config.readout)
+        self._fit_available_samplers()
+
     def _resolve_dataset_path(self, dataset_path: Optional[Union[str, Path]] = None) -> Path:
         raw_path = Path(dataset_path or self.config.dataset_path)
         if raw_path.is_absolute():
@@ -374,6 +441,9 @@ class BootstrapStudentTrainer:
             voltage_decay=self.config.voltage_decay,
             weight_scale=self.config.weight_scale,
             weight_norm=self.config.weight_norm,
+            input_strategy=self.config.input_strategy,
+            input_weight=self.config.input_weight,
+            input_bias=self.config.input_bias,
         ).to(self.device)
 
     def train(self, dataset_path: Optional[Union[str, Path]] = None, initial_model: Optional[BootstrapStudentPolicy] = None) -> TrainingArtifacts:
@@ -429,11 +499,16 @@ class BootstrapStudentTrainer:
                 actions = actions.to(self.device)
                 optimizer.zero_grad()
                 layer_mode = scheduler.mode(epoch, batch_index, train=True)
+                base_mode = getattr(layer_mode, "base_mode", layer_mode)
+                if base_mode in {lava_bootstrap_routine.Mode.ANN, lava_bootstrap_routine.Mode.FIT}:
+                    self._warmup_samplers(states)
                 predicted_actions = self.model(states, mode=layer_mode, readout=self.config.readout)
                 loss = self.criterion(predicted_actions, actions)
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item()
+
+            self._fit_available_samplers()
             last_train_loss = train_loss / max(1, len(train_loader))
 
             self.model.eval()
@@ -523,6 +598,9 @@ def load_bootstrap_policy_from_checkpoint(
     voltage_decay = checkpoint.get("voltage_decay", DEFAULT_BOOTSTRAP_VOLTAGE_DECAY) if isinstance(checkpoint, dict) else DEFAULT_BOOTSTRAP_VOLTAGE_DECAY
     weight_scale = checkpoint.get("weight_scale", 1.0) if isinstance(checkpoint, dict) else 1.0
     weight_norm = checkpoint.get("weight_norm", False) if isinstance(checkpoint, dict) else False
+    input_strategy = checkpoint.get("input_strategy", "signed_split") if isinstance(checkpoint, dict) else "signed_split"
+    input_weight = checkpoint.get("input_weight", 1.0) if isinstance(checkpoint, dict) else 1.0
+    input_bias = checkpoint.get("input_bias", 0.0) if isinstance(checkpoint, dict) else 0.0
 
     if input_dim is None or output_dim is None or hidden_dims is None:
         input_dim, output_dim, hidden_dims = infer_bootstrap_architecture_from_state_dict(state_dict)
@@ -538,6 +616,9 @@ def load_bootstrap_policy_from_checkpoint(
         voltage_decay=float(voltage_decay),
         weight_scale=float(weight_scale),
         weight_norm=bool(weight_norm),
+        input_strategy=str(input_strategy),
+        input_weight=float(input_weight),
+        input_bias=float(input_bias),
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -552,6 +633,9 @@ def load_bootstrap_policy_from_checkpoint(
         "voltage_decay": float(voltage_decay),
         "weight_scale": float(weight_scale),
         "weight_norm": bool(weight_norm),
+        "input_strategy": str(input_strategy),
+        "input_weight": float(input_weight),
+        "input_bias": float(input_bias),
         "backend": "bootstrap",
     }
 
@@ -646,6 +730,40 @@ def evaluate_bootstrap_against_teacher(
     }
 
 
+def collect_bootstrap_activity_stats(
+    bootstrap_model: BootstrapStudentPolicy,
+    states: TensorLike,
+    device: Optional[Union[str, torch.device]] = None,
+) -> dict[str, object]:
+    device = torch.device(device or bootstrap_model.device)
+    batch = torch.as_tensor(states, dtype=torch.float32, device=device)
+    if batch.ndim == 1:
+        batch = batch.unsqueeze(0)
+    x = bootstrap_model.encode_input(batch)
+    block_stats = []
+    with torch.no_grad():
+        for index, block in enumerate(bootstrap_model.blocks):
+            x = block(x, mode=lava_bootstrap_routine.Mode.SNN)
+            block_stats.append(
+                {
+                    "block_index": int(index),
+                    "block_name": type(block).__name__,
+                    "shape": list(x.shape),
+                    "abs_mean": float(x.abs().mean().item()),
+                    "nonzero_fraction": float((x != 0).float().mean().item()),
+                    "min": float(x.min().item()),
+                    "max": float(x.max().item()),
+                }
+            )
+    final_nonzero_fraction = block_stats[-1]["nonzero_fraction"] if block_stats else 0.0
+    return {
+        "input_strategy": bootstrap_model.input_strategy,
+        "encoded_input_dim": int(bootstrap_model.encoded_input_dim),
+        "block_stats": block_stats,
+        "network_silent": bool(final_nonzero_fraction == 0.0),
+    }
+
+
 class BootstrapPolicyPipeline:
     def __init__(
         self,
@@ -682,6 +800,9 @@ class BootstrapPolicyPipeline:
             voltage_decay=self.training_config.voltage_decay,
             weight_scale=self.training_config.weight_scale,
             weight_norm=self.training_config.weight_norm,
+            input_strategy=self.training_config.input_strategy,
+            input_weight=self.training_config.input_weight,
+            input_bias=self.training_config.input_bias,
         ).to(self.device)
         return self.bootstrap_model
 

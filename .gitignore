@@ -9,7 +9,7 @@ wandb/
 commands.txt
 multi_render.txt
 runs/
-experiments/*.sh
+# experiments/*.sh
 !experiments/experiment.sh
 !experiments/test.sh
 bash_history

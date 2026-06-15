@@ -1,5 +1,7 @@
 from copy import deepcopy
 
+from one_policy_to_run_them_all.paths import project_path
+
 
 RECORD_ROBOTS = (
     "unitree_a1",
@@ -20,14 +22,19 @@ RECORD_ROBOTS = (
     "hexapod",
 )
 
-STUDENT_MODEL_PATH = "/app/one_policy_to_run_them_all/student/student_model_best.pth"
-D300K_STUDENT_MODEL_PATH = (
-    "/app/one_policy_to_run_them_all/experiments/teacher-student/"
-    "conversion_target_search_d300k/1024x1024x1024x1024x1024/student_model_best.pth"
+STUDENT_MODEL_PATH = str(project_path("student", "student_model_best.pth"))
+D300K_STUDENT_MODEL_PATH = str(
+    project_path(
+        "experiments",
+        "teacher-student",
+        "conversion_target_search_d300k",
+        "1024x1024x1024x1024x1024",
+        "student_model_best.pth",
+    )
 )
-ONLINE_DAGGER_SNN_DIR = "/app/one_policy_to_run_them_all/experiments/teacher-student/online_dagger_snn"
-BOOTSTRAP_MODEL_PATH = "/app/one_policy_to_run_them_all/experiments/teacher-student/bootstrap_parity/student_model_best.pth"
-ONLINE_DAGGER_BOOTSTRAP_DIR = "/app/one_policy_to_run_them_all/experiments/teacher-student/online_dagger_bootstrap"
+ONLINE_DAGGER_SNN_DIR = str(project_path("experiments", "teacher-student", "online_dagger_snn"))
+BOOTSTRAP_MODEL_PATH = str(project_path("experiments", "teacher-student", "bootstrap_parity", "student_model_best.pth"))
+ONLINE_DAGGER_BOOTSTRAP_DIR = str(project_path("experiments", "teacher-student", "online_dagger_bootstrap"))
 
 DEFAULT_SNN_OVERRIDES = {
     "algorithm.snn_enabled": True,

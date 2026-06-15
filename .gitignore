@@ -9,6 +9,10 @@ wandb/
 commands.txt
 multi_render.txt
 runs/
+build/
+experiments/videos/
+experiments/log/
+student/snn_exports/
 # experiments/*.sh
 !experiments/experiment.sh
 !experiments/test.sh
@@ -16,3 +20,4 @@ bash_history
 *.pth
 *.npz
 *.mp4
+*.hdf5

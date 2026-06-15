@@ -19,17 +19,25 @@ except ImportError:
     lava_conversion = None
 
 try:
-    from bootstrap_backend import (
+    from one_policy_to_run_them_all.student.bootstrap_backend import (
         BootstrapEvaluationArtifacts,
         BootstrapPolicyPipeline,
         BootstrapTrainingConfig,
         BootstrapStudentPolicy,
     )
 except ImportError:
-    BootstrapEvaluationArtifacts = None
-    BootstrapPolicyPipeline = None
-    BootstrapTrainingConfig = None
-    BootstrapStudentPolicy = None
+    try:
+        from bootstrap_backend import (
+            BootstrapEvaluationArtifacts,
+            BootstrapPolicyPipeline,
+            BootstrapTrainingConfig,
+            BootstrapStudentPolicy,
+        )
+    except ImportError:
+        BootstrapEvaluationArtifacts = None
+        BootstrapPolicyPipeline = None
+        BootstrapTrainingConfig = None
+        BootstrapStudentPolicy = None
 
 TensorLike = Union[np.ndarray, torch.Tensor]
 DEFAULT_HIDDEN_DIMS = [1024, 1024, 1024, 1024, 1024]

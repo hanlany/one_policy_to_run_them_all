@@ -5,10 +5,11 @@ from setup import find_environment_assets
 
 def test_setup_package_discovery_includes_nested_packages():
     packages = set(
-        find_packages(include=["experiments", "one_policy_to_run_them_all", "one_policy_to_run_them_all.*"])
+        find_packages(include=["experiments", "one_policy_to_run_them_all", "one_policy_to_run_them_all.*", "student"])
     )
 
     assert "experiments" in packages
+    assert "student" in packages
     assert "one_policy_to_run_them_all" in packages
     assert "one_policy_to_run_them_all.environments.multi_robot" in packages
     assert "one_policy_to_run_them_all.algorithms.uni_ppo.ppo" in packages

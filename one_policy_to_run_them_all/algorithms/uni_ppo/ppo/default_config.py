@@ -1,5 +1,7 @@
 from ml_collections import config_dict
 
+from one_policy_to_run_them_all.paths import project_path
+
 
 def get_config(algorithm_name):
     config = config_dict.ConfigDict()
@@ -39,9 +41,9 @@ def get_config(algorithm_name):
     config.dagger_style = False
     config.dagger_online = 0
 
-    config.student_model_path = "/app/one_policy_to_run_them_all/student/student_model_best.pth"
-    config.student_checkpoint_dir = "/app/one_policy_to_run_them_all/student"
-    config.student_dataset_path = "/app/one_policy_to_run_them_all/student/teacher_student_dagger_dataset.npz"
+    config.student_model_path = str(project_path("student", "student_model_best.pth"))
+    config.student_checkpoint_dir = str(project_path("student"))
+    config.student_dataset_path = str(project_path("student", "teacher_student_dagger_dataset.npz"))
     config.student_hidden_dims = [1024, 1024, 1024, 1024, 1024]
     config.student_backend = "ann"
     config.student_batch_size = 64
@@ -63,11 +65,11 @@ def get_config(algorithm_name):
     config.snn_threshold = 0.2
     config.snn_timesteps = 3
     config.snn_convert_every_iteration = True
-    config.snn_export_dir = "/app/one_policy_to_run_them_all/student/snn_exports"
+    config.snn_export_dir = str(project_path("student", "snn_exports"))
     config.record = False
     config.record_robot_index = -1
     config.record_seconds = 10.0
     config.record_fps = 60
-    config.record_dir = "/app/one_policy_to_run_them_all/experiments/videos"
+    config.record_dir = str(project_path("experiments", "videos"))
 
     return config

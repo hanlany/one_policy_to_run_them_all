@@ -14,131 +14,34 @@ from flax.training import orbax_utils
 import orbax.checkpoint
 import optax
 import wandb
-import torch
-import cv2
-import mujoco
-import sys
-sys.path.append("/app/one_policy_to_run_them_all/student")
-try:
-    from train_student import (
-        DEFAULT_HIDDEN_DIMS,
-        PolicyDistillationPipeline,
-        SNNConversionConfig,
-        StudentTrainingConfig,
-        BootstrapTrainingConfig,
-    )
-except ImportError:
-    print("Could not import student distillation utilities. Make sure train_student.py is in the path.")
 
-from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.general_properties import GeneralProperties
-from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.policy import get_policy
 from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.critic import get_critic
+from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.distillation import (
+    DEFAULT_HIDDEN_DIMS,
+    BootstrapTrainingConfig,
+    PolicyDistillationPipeline,
+    PolicyStageController,
+    SNNConversionConfig,
+    StudentTrainingConfig,
+)
+from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.general_properties import GeneralProperties
+from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.observation_schema import (
+    GENERAL_STATE_FOR_CRITIC_NAMES,
+    GENERAL_STATE_FOR_POLICY_NAMES,
+    build_general_state_mask,
+)
+from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.policy import get_policy
+from one_policy_to_run_them_all.paths import project_path
+from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.recording import (
+    OffscreenMujocoVideoRecorder,
+    VideoFrameWriter,
+    build_recording_path,
+    get_record_env_ids,
+    get_record_timing,
+    sanitize_video_fragment,
+)
 
 rlx_logger = logging.getLogger("rl_x")
-
-
-class PolicyStageController:
-    def __init__(self, teacher_predict, initial_stage="teacher"):
-        self.teacher_predict = teacher_predict
-        self.stage = initial_stage
-        self.student_predict = None
-        self.snn_predict = None
-
-    def register_student(self, predict_fn):
-        self.student_predict = predict_fn
-
-    def register_snn(self, predict_fn):
-        self.snn_predict = predict_fn
-
-    def set_stage(self, stage):
-        self.stage = stage
-
-    def predict(self, policy_state, state, env_id=None, role="behavior"):
-        if role == "teacher_label":
-            return self.teacher_predict(policy_state, state, env_id)
-
-        if self.stage == "snn" and self.snn_predict is not None:
-            return self.snn_predict(state)
-        if self.stage in {"student", "snn"} and self.student_predict is not None:
-            return self.student_predict(state)
-        return self.teacher_predict(policy_state, state, env_id)
-
-
-class VideoFrameWriter:
-    def __init__(self, output_path, fps, frame_width=None, frame_height=None):
-        self.output_path = output_path
-        self.fps = float(max(1, int(round(fps))))
-        self.frame_width = None if frame_width is None else int(frame_width)
-        self.frame_height = None if frame_height is None else int(frame_height)
-        self.writer = None
-        if self.frame_width is not None and self.frame_height is not None:
-            self._open_writer(self.frame_width, self.frame_height)
-
-    def _open_writer(self, frame_width, frame_height):
-        self.writer = cv2.VideoWriter(
-            self.output_path,
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            self.fps,
-            (int(frame_width), int(frame_height)),
-        )
-        if not self.writer.isOpened():
-            raise RuntimeError(f"Could not open video writer for {self.output_path}")
-        self.frame_width = int(frame_width)
-        self.frame_height = int(frame_height)
-
-    def write_rgb_frame(self, frame):
-        if frame is None:
-            raise RuntimeError("Cannot write an empty frame.")
-        if self.writer is None:
-            height, width = frame.shape[:2]
-            self._open_writer(width, height)
-        self.writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-
-    def close(self):
-        if self.writer is not None:
-            self.writer.release()
-            self.writer = None
-
-
-class OffscreenMujocoVideoRecorder:
-    def __init__(self, model, output_path, fps, width=1280, height=720):
-        self.output_path = output_path
-        self.video_writer = None
-        self.renderer = None
-        self.camera = mujoco.MjvCamera()
-
-        max_width = int(getattr(model.vis.global_, "offwidth", width))
-        max_height = int(getattr(model.vis.global_, "offheight", height))
-        safe_width = max(1, min(int(width), max_width))
-        safe_height = max(1, min(int(height), max_height))
-
-        # Keep the output inside MuJoCo's configured offscreen framebuffer limits.
-        self.renderer = mujoco.Renderer(model, height=safe_height, width=safe_width)
-        self.video_writer = VideoFrameWriter(output_path, fps=max(1, int(round(fps))), frame_width=safe_width, frame_height=safe_height)
-        self.set_follow_camera(model)
-
-    def set_follow_camera(self, model):
-        self.camera.fixedcamid = -1
-        self.camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
-        self.camera.trackbodyid = 0
-        self.camera.distance = 3.5
-        self.camera.elevation = 0.0
-        self.camera.azimuth = 90.0
-
-    def capture(self, data):
-        if self.renderer is None or self.video_writer is None:
-            raise RuntimeError("Recorder is not initialized.")
-        self.renderer.update_scene(data, camera=self.camera)
-        self.video_writer.write_rgb_frame(self.renderer.render())
-
-    def close(self):
-        try:
-            if self.video_writer is not None:
-                self.video_writer.close()
-        finally:
-            close = getattr(self.renderer, "close", None)
-            if callable(close):
-                close()
 
 
 class PPO:
@@ -184,7 +87,7 @@ class PPO:
         self.record_robot_index = int(getattr(config.algorithm, "record_robot_index", -1))
         self.record_seconds = float(getattr(config.algorithm, "record_seconds", 10.0))
         self.record_fps = int(getattr(config.algorithm, "record_fps", 60))
-        self.record_dir = getattr(config.algorithm, "record_dir", "/app/one_policy_to_run_them_all/experiments/videos")
+        self.record_dir = getattr(config.algorithm, "record_dir", str(project_path("experiments", "videos")))
         self.multi_render = config.environment.multi_render
         self.batch_size = config.environment.nr_envs * config.algorithm.nr_steps
         self.nr_updates = config.algorithm.total_timesteps // self.batch_size
@@ -227,43 +130,25 @@ class PPO:
 
         state = jnp.array([self.env.single_observation_space.sample() for _ in range(self.nr_envs)])
 
-        # Create policy and critic state masks
-        self.policy_general_state_mask = np.zeros(state.shape)
-        self.critic_general_state_mask = np.zeros(state.shape)
-        general_state_for_policy_names = [
-            "trunk_roll_velocity", "trunk_pitch_velocity", "trunk_yaw_velocity",
-            "goal_x_velocity", "goal_y_velocity", "goal_yaw_velocity",
-            "projected_gravity_x", "projected_gravity_y", "projected_gravity_z",
-            "p_gain", "d_gain", "action_scaling_factor",
-            "mass",
-            "robot_length", "robot_width", "robot_height"
-        ]
-        general_state_for_critic_names = [
-            "trunk_x_velocity", "trunk_y_velocity", "trunk_z_velocity",
-            "trunk_roll_velocity", "trunk_pitch_velocity", "trunk_yaw_velocity",
-            "goal_x_velocity", "goal_y_velocity", "goal_yaw_velocity",
-            "projected_gravity_x", "projected_gravity_y", "projected_gravity_z",
-            "height_0",
-            "p_gain", "d_gain", "action_scaling_factor",
-            "mass",
-            "robot_length", "robot_width", "robot_height"
-        ]
         observation_name_to_ids = self.env.call("observation_name_to_id")
-        for env_id in range(self.nr_envs):
-            for name in general_state_for_policy_names:
-                self.policy_general_state_mask[env_id, observation_name_to_ids[env_id][name]] = 1
-            for name in general_state_for_critic_names:
-                self.critic_general_state_mask[env_id, observation_name_to_ids[env_id][name]] = 1
-        self.policy_general_state_mask = np.array(self.policy_general_state_mask, dtype=bool)
-        self.critic_general_state_mask = np.array(self.critic_general_state_mask, dtype=bool)
+        self.policy_general_state_mask = build_general_state_mask(
+            observation_name_to_ids,
+            state.shape,
+            GENERAL_STATE_FOR_POLICY_NAMES,
+        )
+        self.critic_general_state_mask = build_general_state_mask(
+            observation_name_to_ids,
+            state.shape,
+            GENERAL_STATE_FOR_CRITIC_NAMES,
+        )
         # eval
         if self.nr_eval_envs > 0:
-            self.eval_policy_general_state_mask = np.zeros((self.nr_eval_envs, state.shape[-1]))
             eval_observation_name_to_ids = self.eval_env.call("observation_name_to_id")
-            for env_id in range(self.nr_eval_envs):
-                for name in general_state_for_policy_names:
-                    self.eval_policy_general_state_mask[env_id, eval_observation_name_to_ids[env_id][name]] = 1
-            self.eval_policy_general_state_mask = np.array(self.eval_policy_general_state_mask, dtype=bool)
+            self.eval_policy_general_state_mask = build_general_state_mask(
+                eval_observation_name_to_ids,
+                (self.nr_eval_envs, state.shape[-1]),
+                GENERAL_STATE_FOR_POLICY_NAMES,
+            )
 
         self.nr_envs_per_env_type = self.nr_envs // self.nr_env_types
         self.env_ids = np.array([self.nr_envs_per_env_type * i for i in range(self.nr_env_types + 1)])
@@ -350,32 +235,19 @@ class PPO:
 
     
     def _sanitize_video_fragment(self, value):
-        return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(value))
+        return sanitize_video_fragment(value)
 
 
     def _build_recording_path(self, output_dir, stage_name, env_id, robot_type, timestamp):
-        safe_stage = self._sanitize_video_fragment(stage_name)
-        safe_robot_type = self._sanitize_video_fragment(robot_type)
-        file_name = f"{timestamp}_{safe_stage}_env{env_id:02d}_{safe_robot_type}.mp4"
-        return os.path.join(output_dir, file_name)
+        return build_recording_path(output_dir, stage_name, env_id, robot_type, timestamp)
 
 
     def _get_record_env_ids(self, total_envs):
-        if self.record_robot_index < 0:
-            return list(range(total_envs))
-        env_id = int(self.record_robot_index)
-        if env_id < 0 or env_id >= total_envs:
-            raise ValueError(f"record_robot_index {env_id} is out of range for {total_envs} envs.")
-        return [env_id]
+        return get_record_env_ids(self.record_robot_index, total_envs)
 
 
     def _get_record_timing(self, dt):
-        dt = float(dt)
-        if dt <= 0:
-            raise ValueError(f"Invalid environment dt for recording: {dt}")
-        fps = max(1, int(round(1.0 / dt)))
-        total_frames = max(1, int(round(self.record_seconds * fps)))
-        return fps, total_frames
+        return get_record_timing(self.record_seconds, dt)
 
 
     def _record_vectorized_policy_videos(self, behavior_action_fn, stage_name):
@@ -1110,7 +982,7 @@ class PPO:
         self.set_eval_mode()
 
         algorithm_config = self.config.algorithm
-        student_checkpoint_dir = getattr(algorithm_config, "student_checkpoint_dir", "/app/one_policy_to_run_them_all/student")
+        student_checkpoint_dir = getattr(algorithm_config, "student_checkpoint_dir", str(project_path("student")))
         student_model_path = getattr(algorithm_config, "student_model_path", os.path.join(student_checkpoint_dir, "student_model_best.pth"))
         student_dataset_path = getattr(algorithm_config, "student_dataset_path", os.path.join(student_checkpoint_dir, "teacher_student_dagger_dataset.npz"))
         student_hidden_dims = list(getattr(algorithm_config, "student_hidden_dims", DEFAULT_HIDDEN_DIMS))

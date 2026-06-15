@@ -34,7 +34,7 @@ def setup_package():
         author_email="nico.bohlinger@gmail.com",
         version="0.0.1",
         packages=find_packages(
-            include=["experiments", "one_policy_to_run_them_all", "one_policy_to_run_them_all.*"]
+            include=["experiments", "one_policy_to_run_them_all", "one_policy_to_run_them_all.*", "student"]
         ),
         package_data={
             "experiments": ["configs/*.yaml"],

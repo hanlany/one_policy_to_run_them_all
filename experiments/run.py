@@ -19,11 +19,15 @@ def build_command(preset_name, extra_args, force_record=False, record_robot_inde
     preset = dict(PRESETS[preset_name])
     if force_record:
         preset["algorithm.record"] = True
+        preset["environment.multi_render"] = False
+        preset.setdefault("algorithm.record_robot_index", 0)
     if record_robot_index is not None:
-        preset["algorithm.record_robot_index"] = int(record_robot_index)
-        preset["environment.nr_envs"] = len(RECORD_ROBOTS)
-        preset["environment.multi_render"] = True
-        preset["environment.train_robot_types"] = RECORD_ROBOTS
+        robot = get_record_robot(record_robot_index)
+        preset["algorithm.record"] = True
+        preset["algorithm.record_robot_index"] = 0
+        preset["environment.nr_envs"] = 1
+        preset["environment.multi_render"] = False
+        preset["environment.train_robot_types"] = (robot,)
     experiment_py = Path(__file__).resolve().parent / "experiment.py"
     command = [sys.executable, str(experiment_py)]
     for key, value in preset.items():

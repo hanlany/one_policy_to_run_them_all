@@ -22,13 +22,23 @@ class MujocoViewer:
         self.overlay = {}
         self.font_scale = 100
 
-        glfw.init()
+        if not glfw.init():
+            raise RuntimeError("GLFW could not initialize; no usable display is available")
         glfw.window_hint(glfw.SCALE_TO_MONITOR, glfw.TRUE)
 
         primary_monitor = glfw.get_primary_monitor()
+        if primary_monitor is None:
+            glfw.terminate()
+            raise RuntimeError("GLFW could not find a primary monitor")
         video_mode = glfw.get_video_mode(primary_monitor)
+        if video_mode is None:
+            glfw.terminate()
+            raise RuntimeError("GLFW could not get the primary monitor video mode")
         window_width, window_height = video_mode.size
         self.window = glfw.create_window(width=window_width, height=window_height, title="MuJoCo", monitor=None, share=None)
+        if self.window is None:
+            glfw.terminate()
+            raise RuntimeError("GLFW could not create a MuJoCo window")
         glfw.make_context_current(self.window)
 
         glfw.set_mouse_button_callback(self.window, self.mouse_button)

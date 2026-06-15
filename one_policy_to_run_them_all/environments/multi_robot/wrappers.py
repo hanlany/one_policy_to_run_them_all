@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 import gymnasium as gym
@@ -59,7 +60,11 @@ class MultiRenderWrapper(gym.Wrapper):
         env.active_env_id = self.env_to_render
         model = env.call("model")[self.env_to_render]
         dt = env.call("dt")[self.env_to_render]
-        self.viewer = MujocoViewer(model, dt)
+        try:
+            self.viewer = MujocoViewer(model, dt)
+        except RuntimeError as exc:
+            logging.getLogger("rl_x").warning("Disabling multi_render: %s", exc)
+            self.viewer = None
 
 
     def get_env_to_render(self):
@@ -92,13 +97,16 @@ class MultiRenderWrapper(gym.Wrapper):
             self.env.active_env_id = env_to_render
             model = self.env.call("model")[env_to_render]
             self.env_to_render = env_to_render
-            self.viewer.load_new_model(model)
-        self.viewer.render(self.env.call("data")[env_to_render])
+            if self.viewer is not None:
+                self.viewer.load_new_model(model)
+        if self.viewer is not None:
+            self.viewer.render(self.env.call("data")[env_to_render])
         return data
     
 
     def close(self):
-        self.viewer.close()
+        if self.viewer is not None:
+            self.viewer.close()
         pygame.quit()
         return super().close()
 

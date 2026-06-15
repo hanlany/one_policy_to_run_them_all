@@ -41,12 +41,14 @@ DEFAULT_BOOTSTRAP_OVERRIDES = {
     "algorithm.bootstrap_readout": "mean",
 }
 
+DEFAULT_RECORD_ROBOT = "unitree_h1"
+
 DEFAULT_RECORD_OVERRIDES = {
-    "environment.nr_envs": len(RECORD_ROBOTS),
-    "environment.train_robot_types": RECORD_ROBOTS,
-    "environment.multi_render": True,
+    "environment.nr_envs": 1,
+    "environment.train_robot_types": (DEFAULT_RECORD_ROBOT,),
+    "environment.multi_render": False,
     "algorithm.record": True,
-    "algorithm.record_robot_index": 1,
+    "algorithm.record_robot_index": 0,
 }
 
 
@@ -130,6 +132,14 @@ def build_bootstrap_snn_test_preset(student_model_path, *, bootstrap_timesteps, 
 
 
 PRESETS = {
+    "test_default": build_preset(
+        **{
+            "environment.multi_render": True,
+        },
+    ),
+    "record_default": build_preset(
+        **DEFAULT_RECORD_OVERRIDES,
+    ),
     "collect_data_dagger": build_preset(
         **{
             "environment.multi_render": False,

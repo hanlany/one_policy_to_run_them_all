@@ -1362,6 +1362,9 @@ class PPO:
                     processed_action = get_behavior_action(state)
                     state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                     episode_return += reward
+                    done = np.logical_or(terminated, truncated)
+                    if np.all(done):
+                        break
             rlx_logger.info(f"Episode {i + 1} - Return: {episode_return}")
 
 

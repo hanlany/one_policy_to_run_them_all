@@ -1,1 +1,6 @@
-python3 /app/one_policy_to_run_them_all/experiments/run.py --preset test_student "$@"
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
+exec python3 -m experiments.run --preset test_student "$@"

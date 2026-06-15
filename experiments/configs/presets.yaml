@@ -1,0 +1,213 @@
+record_robots:
+  - unitree_a1
+  - unitree_go1
+  - unitree_go2
+  - anymal_b
+  - anymal_c
+  - barkour_v0
+  - barkour_vb
+  - badger
+  - bittle
+  - unitree_h1
+  - unitree_g1
+  - talos
+  - robotis_op3
+  - nao_v5
+  - cassie
+  - hexapod
+
+base_experiment:
+  algorithm.name: uni_ppo.ppo
+  environment.name: multi_robot
+  runner.track_console: true
+  runner.load_model: pre_trained_model
+  algorithm.determine_fastest_cpu_for_gpu: false
+  algorithm.nr_epochs: 1
+  algorithm.record: false
+  runner.mode: test
+  environment.mode: test
+  environment.add_goal_arrow: true
+  environment.nr_envs: 16
+  environment.render: false
+
+presets:
+  test_default:
+    environment.multi_render: true
+
+  record_default:
+    environment.nr_envs: 1
+    environment.train_robot_types: [unitree_h1]
+    environment.multi_render: false
+    algorithm.record: true
+    algorithm.record_robot_index: 0
+
+  collect_data:
+    environment.multi_render: false
+    algorithm.save_data: true
+    algorithm.data_points: 1000000
+
+  show_config_h1:
+    environment.name: unitree_h1
+    runner.mode: show_config
+    environment.mode: test
+
+  show_model_h1:
+    environment.name: unitree_h1
+    runner.mode: show_model
+    environment.mode: test
+
+  train_full:
+    algorithm.total_timesteps: 1600143360
+    algorithm.nr_steps: 10880
+    algorithm.minibatch_size: 32640
+    algorithm.nr_epochs: 10
+    algorithm.start_learning_rate: 0.0004
+    algorithm.end_learning_rate: 0.0
+    algorithm.entropy_coef: 0.0
+    algorithm.gae_lambda: 0.9
+    algorithm.critic_coef: 1.0
+    algorithm.max_grad_norm: 5.0
+    algorithm.clip_range: 0.1
+    algorithm.evaluation_episodes: 50
+    algorithm.evaluation_frequency: 17233920
+    algorithm.save_latest_frequency: 17233920
+    algorithm.determine_fastest_cpu_for_gpu: true
+    algorithm.device: gpu
+    environment.nr_envs: 48
+    environment.async_skip_percentage: 0.0
+    environment.cycle_cpu_affinity: true
+    environment.seed: 0
+    runner.mode: train
+    runner.track_console: false
+    runner.track_tb: true
+    runner.track_wandb: true
+    runner.save_model: true
+    runner.wandb_entity: placeholder
+    runner.project_name: one_policy_to_run_them_all
+    runner.exp_name: E0
+    runner.notes: ""
+
+  collect_data_dagger:
+    environment.multi_render: false
+    algorithm.save_data: true
+    algorithm.data_points: 300000
+    algorithm.dagger_style: true
+
+  train_dagger:
+    environment.multi_render: false
+    algorithm.save_data: true
+    algorithm.data_points: 20000
+    algorithm.dagger_style: true
+    algorithm.dagger_online: 50
+
+  train_dagger_snn:
+    environment.multi_render: false
+    algorithm.data_points: 20000
+    algorithm.dagger_online: 50
+    algorithm.snn_timesteps: 5
+    algorithm.snn_convert_every_iteration: true
+    algorithm.student_model_path: "{project_root}/student/student_model_best.pth"
+    algorithm.student_checkpoint_dir: "{project_root}/experiments/teacher-student/online_dagger_snn"
+    algorithm.student_dataset_path: "{project_root}/experiments/teacher-student/online_dagger_snn/teacher_student_dagger_dataset.npz"
+    algorithm.snn_export_dir: "{project_root}/experiments/teacher-student/online_dagger_snn/snn_exports"
+    algorithm.snn_enabled: true
+    algorithm.rollout_policy_stage: snn
+    algorithm.snn_threshold: 0.2
+
+  train_dagger_bootstrap:
+    environment.multi_render: false
+    algorithm.data_points: 20000
+    algorithm.dagger_online: 50
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/bootstrap_parity/student_model_best.pth"
+    algorithm.student_checkpoint_dir: "{project_root}/experiments/teacher-student/online_dagger_bootstrap"
+    algorithm.student_dataset_path: "{project_root}/experiments/teacher-student/online_dagger_bootstrap/teacher_student_dagger_dataset.npz"
+    algorithm.student_backend: bootstrap
+    algorithm.bootstrap_timesteps: 3
+    algorithm.bootstrap_readout: mean
+
+  test_student:
+    environment.multi_render: true
+    algorithm.use_student: true
+    algorithm.student_model_path: "{project_root}/student/student_model_best.pth"
+
+  test_snn:
+    environment.multi_render: true
+    algorithm.student_model_path: "{project_root}/student/student_model_best.pth"
+    algorithm.snn_timesteps: 5
+    algorithm.snn_enabled: true
+    algorithm.rollout_policy_stage: snn
+    algorithm.snn_threshold: 0.2
+
+  test_student_d300k:
+    environment.multi_render: true
+    algorithm.use_student: true
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/conversion_target_search_d300k/1024x1024x1024x1024x1024/student_model_best.pth"
+
+  test_snn_d300k:
+    environment.multi_render: true
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/conversion_target_search_d300k/1024x1024x1024x1024x1024/student_model_best.pth"
+    algorithm.snn_timesteps: 3
+    algorithm.snn_enabled: true
+    algorithm.rollout_policy_stage: snn
+    algorithm.snn_threshold: 0.2
+
+  test_bootstrap_student:
+    environment.multi_render: true
+    algorithm.use_student: true
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/bootstrap_parity/student_model_best.pth"
+    algorithm.student_backend: bootstrap
+    algorithm.bootstrap_timesteps: 3
+    algorithm.bootstrap_readout: mean
+
+  test_bootstrap_snn:
+    environment.multi_render: true
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/bootstrap_parity/student_model_best.pth"
+    algorithm.rollout_policy_stage: snn
+    algorithm.bootstrap_timesteps: 3
+    algorithm.student_backend: bootstrap
+    algorithm.bootstrap_readout: mean
+
+  record_bootstrap_student:
+    environment.multi_render: false
+    algorithm.use_student: true
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/bootstrap_parity/student_model_best.pth"
+    algorithm.student_backend: bootstrap
+    algorithm.bootstrap_timesteps: 3
+    algorithm.bootstrap_readout: mean
+    environment.nr_envs: 1
+    environment.train_robot_types: [unitree_h1]
+    algorithm.record: true
+    algorithm.record_robot_index: 0
+
+  record_bootstrap_snn:
+    environment.multi_render: false
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/bootstrap_parity/student_model_best.pth"
+    algorithm.rollout_policy_stage: snn
+    algorithm.bootstrap_timesteps: 3
+    algorithm.student_backend: bootstrap
+    algorithm.bootstrap_readout: mean
+    environment.nr_envs: 1
+    environment.train_robot_types: [unitree_h1]
+    algorithm.record: true
+    algorithm.record_robot_index: 0
+
+  record_student_d300k:
+    environment.multi_render: false
+    algorithm.use_student: true
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/conversion_target_search_d300k/1024x1024x1024x1024x1024/student_model_best.pth"
+    environment.nr_envs: 1
+    environment.train_robot_types: [unitree_h1]
+    algorithm.record: true
+    algorithm.record_robot_index: 0
+
+  record_snn_d300k:
+    environment.multi_render: false
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/conversion_target_search_d300k/1024x1024x1024x1024x1024/student_model_best.pth"
+    algorithm.snn_timesteps: 3
+    algorithm.snn_enabled: true
+    algorithm.rollout_policy_stage: snn
+    algorithm.snn_threshold: 0.2
+    environment.nr_envs: 1
+    environment.train_robot_types: [unitree_h1]
+    algorithm.record: true
+    algorithm.record_robot_index: 0

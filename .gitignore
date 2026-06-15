@@ -9,6 +9,7 @@ wandb/
 commands.txt
 multi_render.txt
 runs/
+artifacts/
 build/
 experiments/videos/
 experiments/log/

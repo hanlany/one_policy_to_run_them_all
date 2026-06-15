@@ -1,12 +1,6 @@
-python3 experiment.py \
-    --algorithm.name=uni_ppo.ppo \
-    --environment.name="unitree_h1" \
-    --runner.track_console=True \
-    --runner.load_model=pre_trained_model \
-    --algorithm.determine_fastest_cpu_for_gpu=False \
-    --runner.mode=show_config \
-    --environment.mode=test \
-    # --environment.add_goal_arrow=True \
-    # --environment.nr_envs=16 \
-    # --environment.multi_render=True \
-    # --environment.render=False
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
+exec python3 -m experiments.run --preset show_config_h1 "$@"

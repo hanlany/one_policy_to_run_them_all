@@ -33,8 +33,13 @@ def setup_package():
         author="Nico Bohlinger",
         author_email="nico.bohlinger@gmail.com",
         version="0.0.1",
-        packages=find_packages(include=["one_policy_to_run_them_all", "one_policy_to_run_them_all.*"]),
-        package_data={"one_policy_to_run_them_all": find_environment_assets()},
+        packages=find_packages(
+            include=["experiments", "one_policy_to_run_them_all", "one_policy_to_run_them_all.*"]
+        ),
+        package_data={
+            "experiments": ["configs/*.yaml"],
+            "one_policy_to_run_them_all": find_environment_assets(),
+        },
         install_requires=read_requirements_file("requirements.txt"),
         license="MIT",
     )

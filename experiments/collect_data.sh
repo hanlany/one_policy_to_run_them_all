@@ -1,15 +1,6 @@
-python3 experiment.py \
-    --algorithm.name=uni_ppo.ppo \
-    --environment.name="multi_robot" \
-    --runner.track_console=True \
-    --runner.load_model=pre_trained_model \
-    --algorithm.determine_fastest_cpu_for_gpu=False \
-    --algorithm.nr_epochs=1 \
-    --runner.mode=test \
-    --environment.mode=test \
-    --environment.add_goal_arrow=True \
-    --environment.nr_envs=16 \
-    --environment.multi_render=False \
-    --environment.render=False \
-    --algorithm.save_data=True \
-    --algorithm.data_points=1000000 
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
+exec python3 -m experiments.run --preset collect_data "$@"

@@ -1,4 +1,4 @@
-from train_student import (
+from student.train_student import (
     DEFAULT_HIDDEN_DIMS,
     BootstrapTrainingConfig,
     PolicyDistillationPipeline,

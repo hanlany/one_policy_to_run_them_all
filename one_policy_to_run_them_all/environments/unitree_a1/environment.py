@@ -7,6 +7,7 @@ import gymnasium as gym
 from dm_control import mjcf
 import pygame
 
+from one_policy_to_run_them_all.environments.robot_spec import BaseMujocoRobotEnv
 from one_policy_to_run_them_all.environments.unitree_a1.viewer import MujocoViewer
 from one_policy_to_run_them_all.environments.unitree_a1.control_functions.handler import get_control_function
 from one_policy_to_run_them_all.environments.unitree_a1.command_functions.handler import get_command_function
@@ -24,7 +25,7 @@ from one_policy_to_run_them_all.environments.unitree_a1.observation_dropout_func
 from one_policy_to_run_them_all.environments.unitree_a1.terrain_functions.handler import get_terrain_function
 
 
-class UnitreeA1(gym.Env):
+class UnitreeA1(BaseMujocoRobotEnv):
     LONG_NAME = "unitree_a1"
     SHORT_NAME = "a1"
 

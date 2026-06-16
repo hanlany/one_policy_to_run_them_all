@@ -6,7 +6,7 @@ from one_policy_to_run_them_all.environments.multi_robot.async_vectorized_wrappe
 from one_policy_to_run_them_all.environments.multi_robot.multi_single_vectorized_wrapper import MultiSingleVectorEnv
 from one_policy_to_run_them_all.environments.multi_robot.wrappers import RLXInfo, MultiRenderWrapper, RecordEpisodeStatistics
 from one_policy_to_run_them_all.environments.multi_robot.general_properties import GeneralProperties
-from one_policy_to_run_them_all.environments.multi_robot.robot_helper import ROBOTS
+from one_policy_to_run_them_all.environments.multi_robot.robot_helper import get_robot_class, get_robot_spec_by_class
 from one_policy_to_run_them_all.environments.multi_robot.cpu_gpu_testing import get_global_cpu_ids, get_fastest_cpu_for_gpu_connection
 
 rlx_logger = logging.getLogger("rl_x")
@@ -20,10 +20,9 @@ def create_env(config):
             env_cpu_id=None
         ):
         def thunk():
-            for robot in ROBOTS:
-                if robot.cls == env_class:
-                    short_name = robot.short_name
-                    termination_type = getattr(config.environment, f"termination_type_{short_name}")
+            robot_spec = get_robot_spec_by_class(env_class)
+            short_name = robot_spec.short_name
+            termination_type = getattr(config.environment, f"termination_type_{short_name}")
             env = env_class(
                 seed=seed,
                 render=config.environment.render and not purpose_initial_check,
@@ -60,13 +59,6 @@ def create_env(config):
             return env
         return thunk
 
-
-    def get_env_class_from_robot_type(robot_type):
-        for robot in ROBOTS:
-            if robot.long_name == robot_type:
-                return robot.cls
-
-
     if config.environment.render and config.environment.multi_render:
         raise ValueError("Render and multi_render cannot be true at the same time")
 
@@ -101,7 +93,7 @@ def create_env(config):
     observation_sizes = []
     action_sizes = []
     for robot_type in config.environment.train_robot_types + config.environment.eval_robot_types:
-        env_class = get_env_class_from_robot_type(robot_type)
+        env_class = get_robot_class(robot_type)
         env = make_env(env_class, config.environment.seed, purpose_initial_check=True)()
         observation_sizes.append(env.observation_space.shape[0])
         action_sizes.append(env.action_space.shape[0])
@@ -113,7 +105,7 @@ def create_env(config):
     env_list = []
     env_id = 0
     for robot_type in config.environment.train_robot_types:
-        env_class = get_env_class_from_robot_type(robot_type)
+        env_class = get_robot_class(robot_type)
         for i in range(nr_envs_per_type):
             env_cpu_id = None if env_cpu_ids is None else env_cpu_ids[env_id]
             env_list.append(make_env(
@@ -136,7 +128,7 @@ def create_env(config):
 
     eval_env_list = []
     for robot_type in config.environment.eval_robot_types:
-        env_class = get_env_class_from_robot_type(robot_type)
+        env_class = get_robot_class(robot_type)
         for i in range(nr_eval_envs_per_type):
             eval_env_list.append(make_env(
                 env_class, config.environment.seed + i,

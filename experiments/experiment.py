@@ -4,8 +4,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 STUDENT_DIR = ROOT / "student"
 
-if str(STUDENT_DIR) not in sys.path:
-    sys.path.append(str(STUDENT_DIR))
+
+def ensure_local_import_paths():
+    for path in (ROOT, STUDENT_DIR):
+        path_string = str(path)
+        if path_string not in sys.path:
+            sys.path.append(path_string)
+
+
+ensure_local_import_paths()
 
 from rl_x.runner.runner import Runner
 

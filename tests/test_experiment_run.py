@@ -91,3 +91,18 @@ def test_write_resolved_config_round_trip(tmp_path):
     loaded = json.loads(output_path.read_text())
     assert loaded["preset"] == "test_default"
     assert loaded["options"]["environment.name"] == "multi_robot"
+
+
+
+def test_experiment_entrypoint_adds_repo_root_to_import_path(monkeypatch):
+    import sys
+    from experiments import experiment
+
+    root = str(experiment.ROOT)
+    student_dir = str(experiment.STUDENT_DIR)
+    monkeypatch.setattr(sys, "path", [path for path in sys.path if path not in {root, student_dir}])
+
+    experiment.ensure_local_import_paths()
+
+    assert root in sys.path
+    assert student_dir in sys.path

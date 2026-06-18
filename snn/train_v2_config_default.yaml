@@ -1,0 +1,52 @@
+paths:
+  dataset: teacher_student_dagger_dataset.npz
+  ann_checkpoint: student_model_latest.pth
+  output_dir: Trained
+  checkpoint_name: network.pt
+  export_name: network.net
+  plot_name: snn_training_curves.png
+
+model:
+  input_dim: 668
+  output_dim: 24
+  hidden_dims: [1024, 1024, 1024, 1024, 1024]
+  time_steps: 3
+  input_strategy: signed_split
+  input_weight: 2.0
+  input_bias: 0.0
+  weight_norm: false
+  weight_scale: 1.0
+  delay_shift: false
+  neuron:
+    threshold: 0.5
+    current_decay: 0.3
+    voltage_decay: 0.02
+    tau_grad: 1.0
+    scale_grad: 1.0
+
+training:
+  epochs: 100
+  train_batch_size: 1024
+  val_batch_size: 1024
+  learning_rate: 1.0e-3
+  val_split: 0.2
+  val_eval_samples: 10000
+  full_val_interval: 10
+  seed: 0
+  val_subset_seed: 1
+  num_workers: 0
+  max_train_samples: null
+  max_val_samples: null
+  pin_memory: null
+
+lr_scheduler:
+  enabled: true
+  factor: 0.5
+  patience: 5
+  threshold: 1.0e-4
+  min_lr: 1.0e-5
+
+runtime:
+  device: auto
+  export_hdf5: true
+  save_plot: true

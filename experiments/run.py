@@ -32,6 +32,7 @@ def resolve_preset(preset_name, force_record=False, record_robot_index=None):
         preset["environment.nr_envs"] = 1
         preset["environment.multi_render"] = False
         preset["environment.train_robot_types"] = (robot,)
+        preset["environment.eval_robot_types"] = RECORD_ROBOTS
     validate_preset(preset_name, preset)
     return preset
 

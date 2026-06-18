@@ -65,6 +65,7 @@ def create_env(config):
     nr_envs_per_type = config.environment.nr_envs // len(config.environment.train_robot_types)
     if nr_envs_per_type * len(config.environment.train_robot_types) != config.environment.nr_envs:
         raise ValueError("Number of train environments must be divisible by number of robot types")
+    nr_eval_envs_per_type = 0
     if config.environment.nr_eval_envs != 0:
         nr_eval_envs_per_type = config.environment.nr_eval_envs / len(config.environment.eval_robot_types)
         if nr_eval_envs_per_type != 1.0:

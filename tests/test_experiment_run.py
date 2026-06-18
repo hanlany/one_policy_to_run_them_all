@@ -35,6 +35,15 @@ def test_record_robot_index_maps_to_single_robot_command():
     assert options["--environment.nr_envs"] == "1"
     assert options["--environment.multi_render"] == "False"
     assert options["--environment.train_robot_types"] == "('anymal_b',)"
+    assert options["--environment.eval_robot_types"] == str(RECORD_ROBOTS)
+
+
+def test_record_student_records_student_stage():
+    command = run.build_command("record_student", extra_args=[])
+    options = _command_options(command)
+
+    assert options["--algorithm.use_student"] == "True"
+    assert options["--algorithm.rollout_policy_stage"] == "student"
 
 
 def test_record_robot_index_validation_message():
@@ -53,6 +62,7 @@ def test_yaml_backed_presets_include_shell_wrapper_targets():
 
 def test_robot_type_lists_load_as_tuples():
     assert PRESETS["record_default"]["environment.train_robot_types"] == ("unitree_h1",)
+    assert PRESETS["record_default"]["algorithm.rollout_policy_stage"] == "teacher"
 
 
 def test_invalid_preset_config_fails_with_clear_error(tmp_path):

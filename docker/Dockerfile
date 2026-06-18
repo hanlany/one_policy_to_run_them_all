@@ -25,7 +25,8 @@ RUN apt-get update && \
         python3 \
         python3-dev \
         python3-pip \
-        vim && \
+        vim \
+        tmux && \
     rm -rf /var/lib/apt/lists/*
 
 RUN ln -sf /usr/bin/python3 /usr/local/bin/python && \

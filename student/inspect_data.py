@@ -1,7 +1,8 @@
 import numpy as np
 import os
 
-file_path = 'teacher_dataset.npz'
+# file_path = 'teacher_dataset.npz'
+file_path = 'teacher_student_dagger_dataset.npz'
 if not os.path.exists(file_path):
     print(f"File {file_path} not found.")
 else:

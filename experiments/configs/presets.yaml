@@ -1,4 +1,4 @@
-record_robots:
+record_robots: &record_robots
   - unitree_a1
   - unitree_go1
   - unitree_go2
@@ -38,6 +38,19 @@ presets:
     environment.nr_envs: 1
     environment.train_robot_types: [unitree_h1]
     environment.multi_render: false
+    algorithm.rollout_policy_stage: teacher
+    algorithm.record: true
+    algorithm.record_robot_index: 0
+
+  record_student:
+    environment.nr_envs: 1
+    environment.train_robot_types: [unitree_h1]
+    environment.eval_robot_types: *record_robots
+    environment.multi_render: false
+    algorithm.use_student: true
+    algorithm.rollout_policy_stage: student
+    algorithm.student_model_path: "{project_root}/student/student_model_best.pth"
+    # algorithm.student_model_path: "{project_root}/student/student_model_dagger_iter_2.pth"
     algorithm.record: true
     algorithm.record_robot_index: 0
 
@@ -98,7 +111,7 @@ presets:
     algorithm.save_data: true
     algorithm.data_points: 20000
     algorithm.dagger_style: true
-    algorithm.dagger_online: 50
+    algorithm.dagger_online: 20
 
   train_dagger_snn:
     environment.multi_render: false
@@ -170,12 +183,14 @@ presets:
   record_bootstrap_student:
     environment.multi_render: false
     algorithm.use_student: true
+    algorithm.rollout_policy_stage: student
     algorithm.student_model_path: "{project_root}/experiments/teacher-student/bootstrap_parity/student_model_best.pth"
     algorithm.student_backend: bootstrap
     algorithm.bootstrap_timesteps: 3
     algorithm.bootstrap_readout: mean
     environment.nr_envs: 1
     environment.train_robot_types: [unitree_h1]
+    environment.eval_robot_types: *record_robots
     algorithm.record: true
     algorithm.record_robot_index: 0
 
@@ -188,15 +203,18 @@ presets:
     algorithm.bootstrap_readout: mean
     environment.nr_envs: 1
     environment.train_robot_types: [unitree_h1]
+    environment.eval_robot_types: *record_robots
     algorithm.record: true
     algorithm.record_robot_index: 0
 
   record_student_d300k:
     environment.multi_render: false
     algorithm.use_student: true
+    algorithm.rollout_policy_stage: student
     algorithm.student_model_path: "{project_root}/experiments/teacher-student/conversion_target_search_d300k/1024x1024x1024x1024x1024/student_model_best.pth"
     environment.nr_envs: 1
     environment.train_robot_types: [unitree_h1]
+    environment.eval_robot_types: *record_robots
     algorithm.record: true
     algorithm.record_robot_index: 0
 
@@ -209,5 +227,6 @@ presets:
     algorithm.snn_threshold: 0.2
     environment.nr_envs: 1
     environment.train_robot_types: [unitree_h1]
+    environment.eval_robot_types: *record_robots
     algorithm.record: true
     algorithm.record_robot_index: 0

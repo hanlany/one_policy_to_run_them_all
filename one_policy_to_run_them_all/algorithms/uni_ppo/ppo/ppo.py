@@ -988,6 +988,9 @@ class PPO:
         student_hidden_dims = list(getattr(algorithm_config, "student_hidden_dims", DEFAULT_HIDDEN_DIMS))
         student_backend = getattr(algorithm_config, "student_backend", "ann")
         rollout_policy_stage = getattr(algorithm_config, "rollout_policy_stage", "student")
+        if self.use_student and rollout_policy_stage == "teacher":
+            rlx_logger.info("algorithm.use_student=True overrides rollout_policy_stage=teacher; recording/rollout will use student.")
+            rollout_policy_stage = "student"
         snn_enabled = getattr(algorithm_config, "snn_enabled", False)
         snn_threshold = getattr(algorithm_config, "snn_threshold", 0.1)
         snn_timesteps = getattr(algorithm_config, "snn_timesteps", 10)

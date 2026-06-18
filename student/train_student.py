@@ -898,6 +898,13 @@ class PolicyDistillationPipeline:
                 output_dim=self.output_dim,
                 hidden_dims=self.training_config.hidden_dims,
             )
+        if self.student_model.input_dim != self.input_dim or self.student_model.output_dim != self.output_dim:
+            raise ValueError(
+                "Student checkpoint architecture does not match the current environment: "
+                f"checkpoint input_dim={self.student_model.input_dim}, output_dim={self.student_model.output_dim}; "
+                f"expected input_dim={self.input_dim}, output_dim={self.output_dim}. "
+                "Use a checkpoint trained for this preset/robot set or switch rollout_policy_stage to teacher."
+            )
         return self.student_model
 
     def train_offline(self, dataset_path: Optional[Union[str, Path]] = None) -> TrainingArtifacts:

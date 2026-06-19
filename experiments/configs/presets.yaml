@@ -207,7 +207,7 @@ presets:
     algorithm.record: true
     algorithm.record_robot_index: 0
 
-  record_ssnv2:
+  record_snnv2:
     environment.multi_render: false
     algorithm.student_model_path: "{project_root}/snn/Trained_long/network.pt"
     algorithm.rollout_policy_stage: snn
@@ -219,6 +219,25 @@ presets:
     algorithm.bootstrap_voltage_decay: 0.02
     algorithm.bootstrap_input_strategy: signed_split
     algorithm.bootstrap_input_weight: 2.0
+    algorithm.bootstrap_input_bias: 0.0
+    environment.nr_envs: 1
+    environment.train_robot_types: [unitree_h1]
+    environment.eval_robot_types: *record_robots
+    algorithm.record: true
+    algorithm.record_robot_index: 0
+
+  record_snnv2_longbest:
+    environment.multi_render: false
+    algorithm.student_model_path: "{project_root}/snn/experiments/snn_v1_points_1_2/20260619T050231Z/long_best/long_e300_ts20_iw1_thr0p2_cd0p3_vd0p02/long_e300_ts20_iw1_thr0p2_cd0p3_vd0p02_network.pt"
+    algorithm.rollout_policy_stage: snn
+    algorithm.bootstrap_timesteps: 20
+    algorithm.student_backend: bootstrap
+    algorithm.bootstrap_readout: mean
+    algorithm.bootstrap_neuron_threshold: 0.2
+    algorithm.bootstrap_current_decay: 0.3
+    algorithm.bootstrap_voltage_decay: 0.02
+    algorithm.bootstrap_input_strategy: signed_split
+    algorithm.bootstrap_input_weight: 1.0
     algorithm.bootstrap_input_bias: 0.0
     environment.nr_envs: 1
     environment.train_robot_types: [unitree_h1]

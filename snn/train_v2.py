@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import sys
 from typing import Any, Iterable
@@ -41,6 +42,7 @@ class PathConfig:
     checkpoint_name: str = "network.pt"
     export_name: str = "network.net"
     plot_name: str = "snn_training_curves.png"
+    history_name: str = "snn_training_history.json"
 
 
 @dataclass
@@ -373,10 +375,26 @@ def pure_snn_rate(model: Network, states: torch.Tensor) -> torch.Tensor:
     return torch.mean(output, dim=-1).reshape((states.shape[0], -1))
 
 
-def evaluate_snn_mse(model: Network, loader: DataLoader, device: torch.device, pin_memory: bool) -> float:
+def percentage_error(predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    numerator = torch.linalg.norm(predictions - targets, dim=1)
+    denominator = torch.linalg.norm(targets, dim=1).clamp_min(1e-8)
+    return 100.0 * numerator / denominator
+
+
+def summarize_percentage_error(errors: list[torch.Tensor]) -> tuple[float, float]:
+    if not errors:
+        return 0.0, 0.0
+    all_errors = torch.cat(errors)
+    return float(all_errors.mean().item()), float(all_errors.median().item())
+
+
+def evaluate_snn_metrics(model: Network, loader: DataLoader, device: torch.device, pin_memory: bool) -> dict[str, float]:
     model.eval()
     loss_sum = 0.0
+    output_abs_sum = 0.0
+    output_numel = 0
     samples = 0
+    percentage_errors: list[torch.Tensor] = []
     with torch.no_grad():
         for states, actions in loader:
             states = states.to(device, non_blocking=pin_memory)
@@ -384,19 +402,31 @@ def evaluate_snn_mse(model: Network, loader: DataLoader, device: torch.device, p
             rate = pure_snn_rate(model, states)
             loss = F.mse_loss(rate, actions)
             loss_sum += loss.item() * states.shape[0]
+            output_abs_sum += rate.abs().sum().item()
+            output_numel += rate.numel()
             samples += states.shape[0]
-    return loss_sum / max(1, samples)
+            percentage_errors.append(percentage_error(rate, actions).detach().cpu())
+    mean_pct, median_pct = summarize_percentage_error(percentage_errors)
+    return {
+        "mse": loss_sum / max(1, samples),
+        "mean_percentage_error": mean_pct,
+        "median_percentage_error": median_pct,
+        "output_abs_mean": output_abs_sum / max(1, output_numel),
+    }
+
+
+def evaluate_snn_mse(model: Network, loader: DataLoader, device: torch.device, pin_memory: bool) -> float:
+    return evaluate_snn_metrics(model, loader, device, pin_memory)["mse"]
 
 
 def save_training_plot(history: dict[str, list[Any]], plot_path: Path) -> None:
     plot_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, loss_ax = plt.subplots(figsize=(10, 4))
+    fig, (loss_ax, pct_ax) = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     loss_ax.plot(history["train_snn_loss"], label="train SNN MSE")
     loss_ax.plot(history["val_snn_loss"], label="validation subset SNN MSE")
     full_val_epochs = [index for index, value in enumerate(history["full_val_snn_loss"]) if value is not None]
     full_val_losses = [value for value in history["full_val_snn_loss"] if value is not None]
     loss_ax.plot(full_val_epochs, full_val_losses, marker="o", linestyle="none", label="full validation SNN MSE")
-    loss_ax.set_xlabel("Epoch")
     loss_ax.set_ylabel("SNN MSE loss")
     loss_ax.grid(True, alpha=0.3)
 
@@ -408,9 +438,44 @@ def save_training_plot(history: dict[str, list[Any]], plot_path: Path) -> None:
     lines, labels = loss_ax.get_legend_handles_labels()
     lr_lines, lr_labels = lr_ax.get_legend_handles_labels()
     loss_ax.legend(lines + lr_lines, labels + lr_labels, loc="best")
+
+    pct_ax.plot(history["train_mean_percentage_error"], label="train mean % error")
+    pct_ax.plot(history["train_median_percentage_error"], label="train median % error")
+    pct_ax.plot(history["val_mean_percentage_error"], label="validation subset mean % error")
+    pct_ax.plot(history["val_median_percentage_error"], label="validation subset median % error")
+    full_val_mean_pct = [value for value in history["full_val_mean_percentage_error"] if value is not None]
+    full_val_median_pct = [value for value in history["full_val_median_percentage_error"] if value is not None]
+    pct_ax.plot(full_val_epochs, full_val_mean_pct, marker="o", linestyle="none", label="full validation mean % error")
+    pct_ax.plot(full_val_epochs, full_val_median_pct, marker="x", linestyle="none", label="full validation median % error")
+    pct_ax.set_xlabel("Epoch")
+    pct_ax.set_ylabel("Percentage error")
+    pct_ax.grid(True, alpha=0.3)
+    pct_ax.legend(loc="best")
+
     fig.tight_layout()
     fig.savefig(plot_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
+
+
+def save_training_history(
+    history: dict[str, list[Any]],
+    history_path: Path,
+    config: Config,
+    best_snn_val_loss: float,
+    checkpoint_path: Path,
+    export_path: Path,
+    plot_path: Path,
+) -> None:
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "config": dataclass_to_dict(config),
+        "best_snn_val_loss": best_snn_val_loss,
+        "checkpoint_path": str(checkpoint_path),
+        "export_path": str(export_path),
+        "plot_path": str(plot_path),
+        "history": history,
+    }
+    history_path.write_text(json.dumps(payload, indent=2))
 
 
 def train(config: Config) -> dict[str, Any]:
@@ -420,6 +485,7 @@ def train(config: Config) -> dict[str, Any]:
     checkpoint_path = output_dir / config.paths.checkpoint_name
     export_path = output_dir / config.paths.export_name
     plot_path = output_dir / config.paths.plot_name
+    history_path = output_dir / config.paths.history_name
     pin_memory = config.training.pin_memory if config.training.pin_memory is not None else device.type == "cuda"
 
     dataset, training_set, testing_set, train_loader, val_loader, full_val_loader = make_loaders(config)
@@ -461,8 +527,16 @@ def train(config: Config) -> dict[str, Any]:
         "train_snn_loss": [],
         "val_snn_loss": [],
         "full_val_snn_loss": [],
+        "train_mean_percentage_error": [],
+        "train_median_percentage_error": [],
+        "val_mean_percentage_error": [],
+        "val_median_percentage_error": [],
+        "full_val_mean_percentage_error": [],
+        "full_val_median_percentage_error": [],
         "learning_rate": [],
         "output_activity": [],
+        "val_output_activity": [],
+        "full_val_output_activity": [],
     }
 
     for epoch in range(config.training.epochs):
@@ -471,6 +545,7 @@ def train(config: Config) -> dict[str, Any]:
         train_output_abs_sum = 0.0
         train_output_numel = 0
         train_samples = 0
+        train_percentage_errors: list[torch.Tensor] = []
 
         for states, actions in train_loader:
             states = states.to(device, non_blocking=pin_memory)
@@ -487,20 +562,35 @@ def train(config: Config) -> dict[str, Any]:
             train_output_abs_sum += rate.detach().abs().sum().item()
             train_output_numel += rate.numel()
             train_samples += states.shape[0]
+            train_percentage_errors.append(percentage_error(rate.detach(), actions).detach().cpu())
 
         train_snn_loss = train_snn_loss_sum / max(1, train_samples)
+        train_mean_pct, train_median_pct = summarize_percentage_error(train_percentage_errors)
         output_activity = train_output_abs_sum / max(1, train_output_numel)
         history["train_snn_loss"].append(train_snn_loss)
+        history["train_mean_percentage_error"].append(train_mean_pct)
+        history["train_median_percentage_error"].append(train_median_pct)
         history["output_activity"].append(output_activity)
 
-        val_snn_loss = evaluate_snn_mse(model, val_loader, device, pin_memory)
+        val_metrics = evaluate_snn_metrics(model, val_loader, device, pin_memory)
+        val_snn_loss = val_metrics["mse"]
         history["val_snn_loss"].append(val_snn_loss)
+        history["val_mean_percentage_error"].append(val_metrics["mean_percentage_error"])
+        history["val_median_percentage_error"].append(val_metrics["median_percentage_error"])
+        history["val_output_activity"].append(val_metrics["output_abs_mean"])
 
         run_full_val = epoch == 0 or (epoch + 1) % config.training.full_val_interval == 0 or epoch == config.training.epochs - 1
         full_val_snn_loss = None
+        full_val_mean_pct = None
+        full_val_median_pct = None
+        full_val_output_activity = None
         checkpoint_note = ""
         if run_full_val:
-            full_val_snn_loss = evaluate_snn_mse(model, full_val_loader, device, pin_memory)
+            full_val_metrics = evaluate_snn_metrics(model, full_val_loader, device, pin_memory)
+            full_val_snn_loss = full_val_metrics["mse"]
+            full_val_mean_pct = full_val_metrics["mean_percentage_error"]
+            full_val_median_pct = full_val_metrics["median_percentage_error"]
+            full_val_output_activity = full_val_metrics["output_abs_mean"]
             if full_val_snn_loss < best_snn_val_loss:
                 best_snn_val_loss = full_val_snn_loss
                 torch.save(model.state_dict(), checkpoint_path)
@@ -512,14 +602,26 @@ def train(config: Config) -> dict[str, Any]:
         current_lr = optimizer.param_groups[0]["lr"]
         history["learning_rate"].append(current_lr)
         history["full_val_snn_loss"].append(full_val_snn_loss)
+        history["full_val_mean_percentage_error"].append(full_val_mean_pct)
+        history["full_val_median_percentage_error"].append(full_val_median_pct)
+        history["full_val_output_activity"].append(full_val_output_activity)
         full_val_text = "n/a" if full_val_snn_loss is None else f"{full_val_snn_loss:.9f}"
+        full_val_mean_pct_text = "n/a" if full_val_mean_pct is None else f"{full_val_mean_pct:.4f}%"
+        full_val_median_pct_text = "n/a" if full_val_median_pct is None else f"{full_val_median_pct:.4f}%"
 
         print(
             f"[Epoch {epoch + 1:03d}/{config.training.epochs}] "
             f"train_snn_mse={train_snn_loss:.9f} val_subset_snn_mse={val_snn_loss:.9f} "
             f"full_val_snn_mse={full_val_text} best_snn_val_mse={best_snn_val_loss:.9f} "
+            f"train_mean_pct={train_mean_pct:.4f}% train_median_pct={train_median_pct:.4f}% "
+            f"val_mean_pct={val_metrics['mean_percentage_error']:.4f}% "
+            f"val_median_pct={val_metrics['median_percentage_error']:.4f}% "
+            f"full_val_mean_pct={full_val_mean_pct_text} full_val_median_pct={full_val_median_pct_text} "
             f"lr={current_lr:.2e} output_abs_mean={output_activity:.6f}{checkpoint_note}"
         )
+
+    save_training_history(history, history_path, config, best_snn_val_loss, checkpoint_path, export_path, plot_path)
+    print(f"Saved training history to {history_path}")
 
     if config.runtime.save_plot:
         save_training_plot(history, plot_path)
@@ -536,6 +638,7 @@ def train(config: Config) -> dict[str, Any]:
         "checkpoint_path": checkpoint_path,
         "export_path": export_path,
         "plot_path": plot_path,
+        "history_path": history_path,
         "history": history,
     }
 

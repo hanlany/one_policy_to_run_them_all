@@ -889,6 +889,9 @@ class PPO:
             "bootstrap_voltage_decay",
             "bootstrap_weight_scale",
             "bootstrap_weight_norm",
+            "bootstrap_input_strategy",
+            "bootstrap_input_weight",
+            "bootstrap_input_bias",
             "student_learning_rate",
             "student_train_epochs",
             "student_num_workers",
@@ -1042,6 +1045,9 @@ class PPO:
                 voltage_decay=getattr(algorithm_config, "bootstrap_voltage_decay", 0.03),
                 weight_scale=getattr(algorithm_config, "bootstrap_weight_scale", 1.0),
                 weight_norm=getattr(algorithm_config, "bootstrap_weight_norm", False),
+                input_strategy=getattr(algorithm_config, "bootstrap_input_strategy", "signed_split"),
+                input_weight=getattr(algorithm_config, "bootstrap_input_weight", 1.0),
+                input_bias=getattr(algorithm_config, "bootstrap_input_bias", 0.0),
             ),
         )
 

@@ -60,6 +60,9 @@ def get_config(algorithm_name):
     config.bootstrap_voltage_decay = 0.03
     config.bootstrap_weight_scale = 1.0
     config.bootstrap_weight_norm = False
+    config.bootstrap_input_strategy = "signed_split"
+    config.bootstrap_input_weight = 1.0
+    config.bootstrap_input_bias = 0.0
     config.rollout_policy_stage = "student"
     config.snn_enabled = False
     config.snn_threshold = 0.2

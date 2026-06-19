@@ -46,6 +46,26 @@ def test_record_student_records_student_stage():
     assert options["--algorithm.rollout_policy_stage"] == "student"
 
 
+def test_record_ssnv2_records_trained_long_bootstrap_snn():
+    command = run.build_command("record_ssnv2", extra_args=[])
+    options = _command_options(command)
+
+    assert options["--algorithm.student_backend"] == "bootstrap"
+    assert options["--algorithm.rollout_policy_stage"] == "snn"
+    assert options["--algorithm.student_model_path"].endswith("/snn/Trained_long/network.pt")
+    assert options["--algorithm.bootstrap_timesteps"] == "3"
+    assert options["--algorithm.bootstrap_readout"] == "mean"
+    assert options["--algorithm.bootstrap_neuron_threshold"] == "0.5"
+    assert options["--algorithm.bootstrap_current_decay"] == "0.3"
+    assert options["--algorithm.bootstrap_voltage_decay"] == "0.02"
+    assert options["--algorithm.bootstrap_input_strategy"] == "signed_split"
+    assert options["--algorithm.bootstrap_input_weight"] == "2.0"
+    assert options["--algorithm.bootstrap_input_bias"] == "0.0"
+    assert options["--algorithm.record"] == "True"
+    assert options["--environment.nr_envs"] == "1"
+    assert options["--environment.multi_render"] == "False"
+
+
 def test_record_robot_index_validation_message():
     with pytest.raises(ValueError, match=f"0 to {len(RECORD_ROBOTS) - 1}"):
         run.build_command("test_default", extra_args=[], record_robot_index=len(RECORD_ROBOTS))

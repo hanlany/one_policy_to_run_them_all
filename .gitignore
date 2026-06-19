@@ -18,7 +18,10 @@ student/snn_exports/
 !experiments/experiment.sh
 !experiments/test.sh
 bash_history
+snn/experiments/
 *.pth
+*.pt
 *.npz
 *.mp4
 *.hdf5
+*.net

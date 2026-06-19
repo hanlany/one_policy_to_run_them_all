@@ -583,6 +583,16 @@ def load_bootstrap_policy_from_checkpoint(
     input_dim: Optional[int] = None,
     output_dim: Optional[int] = None,
     hidden_dims: Optional[Sequence[int]] = None,
+    timesteps: int = 3,
+    readout: str = "mean",
+    neuron_threshold: float = DEFAULT_BOOTSTRAP_NEURON_THRESHOLD,
+    current_decay: float = DEFAULT_BOOTSTRAP_CURRENT_DECAY,
+    voltage_decay: float = DEFAULT_BOOTSTRAP_VOLTAGE_DECAY,
+    weight_scale: float = 1.0,
+    weight_norm: bool = False,
+    input_strategy: str = "signed_split",
+    input_weight: float = 1.0,
+    input_bias: float = 0.0,
 ) -> tuple[BootstrapStudentPolicy, dict[str, object]]:
     checkpoint_path = Path(checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -591,16 +601,16 @@ def load_bootstrap_policy_from_checkpoint(
     input_dim = checkpoint.get("input_dim", input_dim) if isinstance(checkpoint, dict) else input_dim
     output_dim = checkpoint.get("output_dim", output_dim) if isinstance(checkpoint, dict) else output_dim
     hidden_dims = checkpoint.get("hidden_dims", hidden_dims) if isinstance(checkpoint, dict) else hidden_dims
-    timesteps = checkpoint.get("timesteps", 3) if isinstance(checkpoint, dict) else 3
-    readout = checkpoint.get("readout", "mean") if isinstance(checkpoint, dict) else "mean"
-    neuron_threshold = checkpoint.get("neuron_threshold", DEFAULT_BOOTSTRAP_NEURON_THRESHOLD) if isinstance(checkpoint, dict) else DEFAULT_BOOTSTRAP_NEURON_THRESHOLD
-    current_decay = checkpoint.get("current_decay", DEFAULT_BOOTSTRAP_CURRENT_DECAY) if isinstance(checkpoint, dict) else DEFAULT_BOOTSTRAP_CURRENT_DECAY
-    voltage_decay = checkpoint.get("voltage_decay", DEFAULT_BOOTSTRAP_VOLTAGE_DECAY) if isinstance(checkpoint, dict) else DEFAULT_BOOTSTRAP_VOLTAGE_DECAY
-    weight_scale = checkpoint.get("weight_scale", 1.0) if isinstance(checkpoint, dict) else 1.0
-    weight_norm = checkpoint.get("weight_norm", False) if isinstance(checkpoint, dict) else False
-    input_strategy = checkpoint.get("input_strategy", "signed_split") if isinstance(checkpoint, dict) else "signed_split"
-    input_weight = checkpoint.get("input_weight", 1.0) if isinstance(checkpoint, dict) else 1.0
-    input_bias = checkpoint.get("input_bias", 0.0) if isinstance(checkpoint, dict) else 0.0
+    timesteps = checkpoint.get("timesteps", timesteps) if isinstance(checkpoint, dict) else timesteps
+    readout = checkpoint.get("readout", readout) if isinstance(checkpoint, dict) else readout
+    neuron_threshold = checkpoint.get("neuron_threshold", neuron_threshold) if isinstance(checkpoint, dict) else neuron_threshold
+    current_decay = checkpoint.get("current_decay", current_decay) if isinstance(checkpoint, dict) else current_decay
+    voltage_decay = checkpoint.get("voltage_decay", voltage_decay) if isinstance(checkpoint, dict) else voltage_decay
+    weight_scale = checkpoint.get("weight_scale", weight_scale) if isinstance(checkpoint, dict) else weight_scale
+    weight_norm = checkpoint.get("weight_norm", weight_norm) if isinstance(checkpoint, dict) else weight_norm
+    input_strategy = checkpoint.get("input_strategy", input_strategy) if isinstance(checkpoint, dict) else input_strategy
+    input_weight = checkpoint.get("input_weight", input_weight) if isinstance(checkpoint, dict) else input_weight
+    input_bias = checkpoint.get("input_bias", input_bias) if isinstance(checkpoint, dict) else input_bias
 
     if input_dim is None or output_dim is None or hidden_dims is None:
         input_dim, output_dim, hidden_dims = infer_bootstrap_architecture_from_state_dict(state_dict)
@@ -813,6 +823,16 @@ class BootstrapPolicyPipeline:
             input_dim=self.input_dim,
             output_dim=self.output_dim,
             hidden_dims=self.training_config.hidden_dims,
+            timesteps=self.training_config.timesteps,
+            readout=self.training_config.readout,
+            neuron_threshold=self.training_config.neuron_threshold,
+            current_decay=self.training_config.current_decay,
+            voltage_decay=self.training_config.voltage_decay,
+            weight_scale=self.training_config.weight_scale,
+            weight_norm=self.training_config.weight_norm,
+            input_strategy=self.training_config.input_strategy,
+            input_weight=self.training_config.input_weight,
+            input_bias=self.training_config.input_bias,
         )
         return self.bootstrap_model
 

@@ -24,6 +24,7 @@ DEFAULT_BOOTSTRAP_CURRENT_DECAY = 0.25
 DEFAULT_BOOTSTRAP_VOLTAGE_DECAY = 0.03
 DEFAULT_BOOTSTRAP_NUM_SAMPLE_ITER = 10
 DEFAULT_BOOTSTRAP_SAMPLE_PERIOD = 10
+SUPPORTED_BOOTSTRAP_TRAINING_MODES = ("scheduler", "pure_snn")
 _BOOTSTRAP_DEVICE_WARNING_EMITTED = False
 
 
@@ -87,6 +88,12 @@ class BootstrapTrainingConfig:
     weight_scale: float = 1.0
     weight_norm: bool = False
     initialize_from_ann: bool = False
+    training_mode: str = "scheduler"
+    lr_scheduler_enabled: bool = False
+    lr_scheduler_factor: float = 0.5
+    lr_scheduler_patience: int = 5
+    lr_scheduler_threshold: float = 1e-4
+    lr_scheduler_min_lr: float = 1e-5
 
 
 @dataclass
@@ -478,12 +485,32 @@ class BootstrapStudentTrainer:
         self.model = initial_model.to(self.device) if initial_model is not None else self._build_model(input_dim, output_dim)
         if initialize_from_ann is not None:
             self.model.initialize_from_ann(initialize_from_ann)
+
+        training_mode = str(self.config.training_mode)
+        if training_mode not in SUPPORTED_BOOTSTRAP_TRAINING_MODES:
+            raise ValueError(
+                f"Unsupported bootstrap training_mode '{training_mode}'. "
+                f"Supported modes: {SUPPORTED_BOOTSTRAP_TRAINING_MODES}"
+            )
+
         optimizer = optim.Adam(self.model.parameters(), lr=self.config.learning_rate)
-        scheduler = lava_bootstrap_routine.Scheduler(
-            num_sample_iter=self.config.num_sample_iter,
-            sample_period=self.config.sample_period,
-            crossover_epochs=list(self.config.crossover_epochs) if self.config.crossover_epochs else None,
-        )
+        scheduler = None
+        if training_mode == "scheduler":
+            scheduler = lava_bootstrap_routine.Scheduler(
+                num_sample_iter=self.config.num_sample_iter,
+                sample_period=self.config.sample_period,
+                crossover_epochs=list(self.config.crossover_epochs) if self.config.crossover_epochs else None,
+            )
+        lr_scheduler = None
+        if self.config.lr_scheduler_enabled:
+            lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=self.config.lr_scheduler_factor,
+                patience=self.config.lr_scheduler_patience,
+                threshold=self.config.lr_scheduler_threshold,
+                min_lr=self.config.lr_scheduler_min_lr,
+            )
 
         best_val_loss = float("inf")
         last_train_loss = float("inf")
@@ -498,17 +525,25 @@ class BootstrapStudentTrainer:
                 states = states.to(self.device)
                 actions = actions.to(self.device)
                 optimizer.zero_grad()
-                layer_mode = scheduler.mode(epoch, batch_index, train=True)
-                base_mode = getattr(layer_mode, "base_mode", layer_mode)
-                if base_mode in {lava_bootstrap_routine.Mode.ANN, lava_bootstrap_routine.Mode.FIT}:
-                    self._warmup_samplers(states)
-                predicted_actions = self.model(states, mode=layer_mode, readout=self.config.readout)
+                if training_mode == "pure_snn":
+                    predicted_actions = self.model(
+                        states,
+                        mode=lava_bootstrap_routine.Mode.SNN,
+                        readout=self.config.readout,
+                    )
+                else:
+                    layer_mode = scheduler.mode(epoch, batch_index, train=True)
+                    base_mode = getattr(layer_mode, "base_mode", layer_mode)
+                    if base_mode in {lava_bootstrap_routine.Mode.ANN, lava_bootstrap_routine.Mode.FIT}:
+                        self._warmup_samplers(states)
+                    predicted_actions = self.model(states, mode=layer_mode, readout=self.config.readout)
                 loss = self.criterion(predicted_actions, actions)
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item()
 
-            self._fit_available_samplers()
+            if training_mode == "scheduler":
+                self._fit_available_samplers()
             last_train_loss = train_loss / max(1, len(train_loader))
 
             self.model.eval()
@@ -525,13 +560,15 @@ class BootstrapStudentTrainer:
                         val_loss += loss.item()
                 val_loss = val_loss / max(1, len(val_loader))
             last_val_loss = val_loss
+            if lr_scheduler is not None:
+                lr_scheduler.step(val_loss)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 self.checkpoint_manager.save(
                     self.model,
                     best_checkpoint_path,
-                    extra_metadata={"best_val_loss": best_val_loss, "epoch": epoch + 1},
+                    extra_metadata={"best_val_loss": best_val_loss, "epoch": epoch + 1, "training_mode": training_mode},
                 )
 
         self.checkpoint_manager.save(
@@ -541,6 +578,7 @@ class BootstrapStudentTrainer:
                 "best_val_loss": best_val_loss,
                 "last_train_loss": last_train_loss,
                 "last_val_loss": last_val_loss,
+                "training_mode": training_mode,
             },
         )
 
@@ -550,7 +588,7 @@ class BootstrapStudentTrainer:
             self.checkpoint_manager.save(
                 self.model,
                 iteration_checkpoint_path,
-                extra_metadata={"best_val_loss": best_val_loss, "iteration": iteration},
+                extra_metadata={"best_val_loss": best_val_loss, "iteration": iteration, "training_mode": training_mode},
             )
 
         self.model.eval()
@@ -613,7 +651,15 @@ def load_bootstrap_policy_from_checkpoint(
     input_bias = checkpoint.get("input_bias", input_bias) if isinstance(checkpoint, dict) else input_bias
 
     if input_dim is None or output_dim is None or hidden_dims is None:
-        input_dim, output_dim, hidden_dims = infer_bootstrap_architecture_from_state_dict(state_dict)
+        inferred_input_dim, inferred_output_dim, inferred_hidden_dims = infer_bootstrap_architecture_from_state_dict(state_dict)
+        if input_dim is None:
+            input_dim = inferred_input_dim
+            if str(input_strategy) == "signed_split" and inferred_input_dim % 2 == 0:
+                input_dim = inferred_input_dim // 2
+        if output_dim is None:
+            output_dim = inferred_output_dim
+        if hidden_dims is None:
+            hidden_dims = inferred_hidden_dims
 
     model = BootstrapStudentPolicy(
         input_dim=int(input_dim),

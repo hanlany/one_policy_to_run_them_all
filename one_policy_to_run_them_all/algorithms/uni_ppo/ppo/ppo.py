@@ -21,6 +21,7 @@ from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.distillation import (
     BootstrapTrainingConfig,
     PolicyDistillationPipeline,
     PolicyStageController,
+    get_online_dagger_expert_ratio,
     SNNConversionConfig,
     StudentTrainingConfig,
 )
@@ -874,6 +875,7 @@ class PPO:
             del algorithm_dict["dagger_online"]
         for key in (
             "student_model_path",
+            "student_initial_model_path",
             "student_checkpoint_dir",
             "student_dataset_path",
             "student_hidden_dims",
@@ -892,6 +894,12 @@ class PPO:
             "bootstrap_input_strategy",
             "bootstrap_input_weight",
             "bootstrap_input_bias",
+            "bootstrap_training_mode",
+            "bootstrap_lr_scheduler_enabled",
+            "bootstrap_lr_scheduler_factor",
+            "bootstrap_lr_scheduler_patience",
+            "bootstrap_lr_scheduler_threshold",
+            "bootstrap_lr_scheduler_min_lr",
             "student_learning_rate",
             "student_train_epochs",
             "student_num_workers",
@@ -987,6 +995,7 @@ class PPO:
         algorithm_config = self.config.algorithm
         student_checkpoint_dir = getattr(algorithm_config, "student_checkpoint_dir", str(project_path("student")))
         student_model_path = getattr(algorithm_config, "student_model_path", os.path.join(student_checkpoint_dir, "student_model_best.pth"))
+        student_initial_model_path = getattr(algorithm_config, "student_initial_model_path", "")
         student_dataset_path = getattr(algorithm_config, "student_dataset_path", os.path.join(student_checkpoint_dir, "teacher_student_dagger_dataset.npz"))
         student_hidden_dims = list(getattr(algorithm_config, "student_hidden_dims", DEFAULT_HIDDEN_DIMS))
         student_backend = getattr(algorithm_config, "student_backend", "ann")
@@ -1048,6 +1057,12 @@ class PPO:
                 input_strategy=getattr(algorithm_config, "bootstrap_input_strategy", "signed_split"),
                 input_weight=getattr(algorithm_config, "bootstrap_input_weight", 1.0),
                 input_bias=getattr(algorithm_config, "bootstrap_input_bias", 0.0),
+                training_mode=getattr(algorithm_config, "bootstrap_training_mode", "scheduler"),
+                lr_scheduler_enabled=getattr(algorithm_config, "bootstrap_lr_scheduler_enabled", False),
+                lr_scheduler_factor=getattr(algorithm_config, "bootstrap_lr_scheduler_factor", 0.5),
+                lr_scheduler_patience=getattr(algorithm_config, "bootstrap_lr_scheduler_patience", 5),
+                lr_scheduler_threshold=getattr(algorithm_config, "bootstrap_lr_scheduler_threshold", 1e-4),
+                lr_scheduler_min_lr=getattr(algorithm_config, "bootstrap_lr_scheduler_min_lr", 1e-5),
             ),
         )
 
@@ -1069,14 +1084,23 @@ class PPO:
             return controller.predict(self.policy_state, state, env_id=current_env_id(), role="teacher_label")
 
         def load_student_checkpoint(log_missing=False):
-            if not os.path.exists(student_model_path):
-                if log_missing:
-                    rlx_logger.warning(f"Student model not found at {student_model_path}")
-                return False
-            pipeline.load_student_policy(student_model_path)
-            controller.register_student(pipeline.predict_student)
-            rlx_logger.info(f"Loaded student model from {student_model_path}")
-            return True
+            candidate_paths = [("student model", student_model_path)]
+            if student_initial_model_path and student_initial_model_path != student_model_path:
+                candidate_paths.append(("initial student model", student_initial_model_path))
+
+            missing_paths = []
+            for label, checkpoint_path in candidate_paths:
+                if checkpoint_path and os.path.exists(checkpoint_path):
+                    pipeline.load_student_policy(checkpoint_path)
+                    controller.register_student(pipeline.predict_student)
+                    rlx_logger.info(f"Loaded {label} from {checkpoint_path}")
+                    return True
+                missing_paths.append((label, checkpoint_path))
+
+            if log_missing:
+                missing_text = ", ".join(f"{label}: {path}" for label, path in missing_paths if path)
+                rlx_logger.warning(f"Student model not found ({missing_text})")
+            return False
 
         def build_snn_artifact(export_name=None):
             if student_backend != "bootstrap" and not snn_enabled:
@@ -1133,14 +1157,7 @@ class PPO:
                 actions = []
                 total_iterations = self.data_points // self.nr_envs
 
-                if iteration == 0:
-                    expert_ratio = 1.0
-                elif iteration == 1:
-                    expert_ratio = 0.5
-                elif iteration == 2:
-                    expert_ratio = 0.25
-                else:
-                    expert_ratio = 0.0
+                expert_ratio = get_online_dagger_expert_ratio(iteration)
 
                 expert_data_points = int(expert_ratio * total_iterations)
                 controller.set_stage("teacher")
@@ -1183,7 +1200,9 @@ class PPO:
                     f"val_loss={artifacts.last_val_loss:.6f}, best_val={artifacts.best_val_loss:.6f}"
                 )
 
-                if snn_enabled and (snn_convert_every_iteration or controller.snn_predict is None or rollout_policy_stage == "snn"):
+                if (snn_enabled or rollout_policy_stage == "snn") and (
+                    snn_convert_every_iteration or controller.snn_predict is None or rollout_policy_stage == "snn"
+                ):
                     export_name = f"student_model_dagger_iter_{iteration + 1}.hdf5"
                     if build_snn_artifact(export_name=export_name) and rollout_policy_stage == "snn":
                         controller.set_stage("snn")

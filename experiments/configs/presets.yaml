@@ -127,6 +127,34 @@ presets:
     algorithm.rollout_policy_stage: snn
     algorithm.snn_threshold: 0.2
 
+  train_dagger_snnv2_longbest:
+    environment.multi_render: false
+    algorithm.data_points: 20000
+    algorithm.dagger_online: 20
+    algorithm.student_backend: bootstrap
+    algorithm.rollout_policy_stage: snn
+    algorithm.student_initial_model_path: "{project_root}/snn/experiments/snn_v1_points_1_2/20260619T050231Z/long_best/long_e300_ts20_iw1_thr0p2_cd0p3_vd0p02/long_e300_ts20_iw1_thr0p2_cd0p3_vd0p02_network.pt"
+    algorithm.student_checkpoint_dir: "{project_root}/experiments/teacher-student/online_dagger_snnv2_longbest"
+    algorithm.student_model_path: "{project_root}/experiments/teacher-student/online_dagger_snnv2_longbest/student_model_best.pth"
+    algorithm.student_dataset_path: "{project_root}/experiments/teacher-student/online_dagger_snnv2_longbest/teacher_student_dagger_dataset.npz"
+    algorithm.student_batch_size: 1024
+    algorithm.student_learning_rate: 0.002
+    algorithm.student_train_epochs: 50
+    algorithm.bootstrap_training_mode: pure_snn
+    algorithm.bootstrap_timesteps: 20
+    algorithm.bootstrap_readout: mean
+    algorithm.bootstrap_neuron_threshold: 0.2
+    algorithm.bootstrap_current_decay: 0.3
+    algorithm.bootstrap_voltage_decay: 0.02
+    algorithm.bootstrap_input_strategy: signed_split
+    algorithm.bootstrap_input_weight: 1.0
+    algorithm.bootstrap_input_bias: 0.0
+    algorithm.bootstrap_lr_scheduler_enabled: true
+    algorithm.bootstrap_lr_scheduler_factor: 0.7
+    algorithm.bootstrap_lr_scheduler_patience: 10
+    algorithm.bootstrap_lr_scheduler_threshold: 5.0e-5
+    algorithm.bootstrap_lr_scheduler_min_lr: 2.0e-5
+
   train_dagger_bootstrap:
     environment.multi_render: false
     algorithm.data_points: 20000

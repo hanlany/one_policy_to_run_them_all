@@ -32,3 +32,15 @@ class PolicyStageController:
         if self.stage in {"student", "snn"} and self.student_predict is not None:
             return self.student_predict(state)
         return self.teacher_predict(policy_state, state, env_id)
+
+
+def get_online_dagger_expert_ratio(iteration_index):
+    if iteration_index < 0:
+        raise ValueError("DAgger iteration index must be non-negative.")
+    if iteration_index == 0:
+        return 1.0
+    if iteration_index == 1:
+        return 0.5
+    if iteration_index == 2:
+        return 0.25
+    return 0.0

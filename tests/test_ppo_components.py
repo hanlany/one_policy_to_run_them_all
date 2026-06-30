@@ -1,7 +1,10 @@
 import numpy as np
 import pytest
 
-from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.distillation import PolicyStageController
+from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.distillation import (
+    PolicyStageController,
+    get_online_dagger_expert_ratio,
+)
 from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.observation_schema import build_general_state_mask
 from one_policy_to_run_them_all.algorithms.uni_ppo.ppo.recording import (
     build_recording_path,
@@ -39,6 +42,13 @@ def test_policy_stage_controller_prefers_snn_then_student_then_teacher():
 
     controller.register_snn(lambda state: "snn")
     assert controller.predict(None, "state") == "snn"
+
+
+def test_online_dagger_expert_ratio_schedule():
+    assert [get_online_dagger_expert_ratio(index) for index in range(5)] == [1.0, 0.5, 0.25, 0.0, 0.0]
+
+    with pytest.raises(ValueError, match="non-negative"):
+        get_online_dagger_expert_ratio(-1)
 
 
 def test_build_general_state_mask_selects_named_columns_per_env():

@@ -46,8 +46,8 @@ def test_record_student_records_student_stage():
     assert options["--algorithm.rollout_policy_stage"] == "student"
 
 
-def test_record_ssnv2_records_trained_long_bootstrap_snn():
-    command = run.build_command("record_ssnv2", extra_args=[])
+def test_record_snnv2_records_trained_long_bootstrap_snn():
+    command = run.build_command("record_snnv2", extra_args=[])
     options = _command_options(command)
 
     assert options["--algorithm.student_backend"] == "bootstrap"
@@ -64,6 +64,36 @@ def test_record_ssnv2_records_trained_long_bootstrap_snn():
     assert options["--algorithm.record"] == "True"
     assert options["--environment.nr_envs"] == "1"
     assert options["--environment.multi_render"] == "False"
+
+
+def test_train_dagger_snnv2_longbest_resolves_online_bootstrap_snn():
+    command = run.build_command("train_dagger_snnv2_longbest", extra_args=[])
+    options = _command_options(command)
+
+    assert options["--algorithm.student_backend"] == "bootstrap"
+    assert options["--algorithm.rollout_policy_stage"] == "snn"
+    assert options["--algorithm.student_initial_model_path"].endswith(
+        "/snn/experiments/snn_v1_points_1_2/20260619T050231Z/long_best/"
+        "long_e300_ts20_iw1_thr0p2_cd0p3_vd0p02/long_e300_ts20_iw1_thr0p2_cd0p3_vd0p02_network.pt"
+    )
+    assert options["--algorithm.student_checkpoint_dir"].endswith(
+        "/experiments/teacher-student/online_dagger_snnv2_longbest"
+    )
+    assert options["--algorithm.student_model_path"].endswith(
+        "/experiments/teacher-student/online_dagger_snnv2_longbest/student_model_best.pth"
+    )
+    assert options["--algorithm.student_train_epochs"] == "50"
+    assert options["--algorithm.dagger_online"] == "50"
+    assert options["--algorithm.data_points"] == "20000"
+    assert options["--algorithm.bootstrap_training_mode"] == "pure_snn"
+    assert options["--algorithm.bootstrap_timesteps"] == "20"
+    assert options["--algorithm.bootstrap_readout"] == "mean"
+    assert options["--algorithm.bootstrap_neuron_threshold"] == "0.2"
+    assert options["--algorithm.bootstrap_current_decay"] == "0.3"
+    assert options["--algorithm.bootstrap_voltage_decay"] == "0.02"
+    assert options["--algorithm.bootstrap_input_strategy"] == "signed_split"
+    assert options["--algorithm.bootstrap_input_weight"] == "1.0"
+    assert options["--algorithm.bootstrap_lr_scheduler_enabled"] == "True"
 
 
 def test_record_robot_index_validation_message():

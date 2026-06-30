@@ -42,6 +42,7 @@ def get_config(algorithm_name):
     config.dagger_online = 0
 
     config.student_model_path = str(project_path("student", "student_model_best.pth"))
+    config.student_initial_model_path = ""
     config.student_checkpoint_dir = str(project_path("student"))
     config.student_dataset_path = str(project_path("student", "teacher_student_dagger_dataset.npz"))
     config.student_hidden_dims = [1024, 1024, 1024, 1024, 1024]
@@ -63,6 +64,12 @@ def get_config(algorithm_name):
     config.bootstrap_input_strategy = "signed_split"
     config.bootstrap_input_weight = 1.0
     config.bootstrap_input_bias = 0.0
+    config.bootstrap_training_mode = "scheduler"
+    config.bootstrap_lr_scheduler_enabled = False
+    config.bootstrap_lr_scheduler_factor = 0.5
+    config.bootstrap_lr_scheduler_patience = 5
+    config.bootstrap_lr_scheduler_threshold = 1e-4
+    config.bootstrap_lr_scheduler_min_lr = 1e-5
     config.rollout_policy_stage = "student"
     config.snn_enabled = False
     config.snn_threshold = 0.2

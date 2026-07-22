@@ -33,6 +33,9 @@ for path in (SNN_DIR, LAVA_SRC):
 
 import lava.lib.dl.bootstrap as bootstrap  # noqa: E402
 
+SUPPORTED_INIT_POLICIES = {"exact", "partial", "none"}
+SUPPORTED_BOOTSTRAP_TRAINING_MODES = {"pure_snn", "scheduler"}
+
 
 @dataclass
 class PathConfig:
@@ -66,6 +69,7 @@ class ModelConfig:
     weight_norm: bool = False
     weight_scale: float = 1.0
     delay_shift: bool = False
+    init_policy: str = "exact"
     neuron: NeuronConfig = field(default_factory=NeuronConfig)
 
 
@@ -96,6 +100,14 @@ class LRSchedulerConfig:
 
 
 @dataclass
+class BootstrapTrainingConfig:
+    mode: str = "pure_snn"
+    num_sample_iter: int = 10
+    sample_period: int = 10
+    crossover_epochs: list[int] = field(default_factory=list)
+
+
+@dataclass
 class RuntimeConfig:
     device: str = "auto"
     export_hdf5: bool = True
@@ -108,6 +120,7 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     lr_scheduler: LRSchedulerConfig = field(default_factory=LRSchedulerConfig)
+    bootstrap_training: BootstrapTrainingConfig = field(default_factory=BootstrapTrainingConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
 
@@ -137,6 +150,7 @@ def build_config(data: dict[str, Any]) -> Config:
         model=ModelConfig(**model_data, neuron=neuron),
         training=TrainingConfig(**data.get("training", {})),
         lr_scheduler=LRSchedulerConfig(**data.get("lr_scheduler", {})),
+        bootstrap_training=BootstrapTrainingConfig(**data.get("bootstrap_training", {})),
         runtime=RuntimeConfig(**data.get("runtime", {})),
     )
 
@@ -244,31 +258,107 @@ class Network(torch.nn.Module):
         )
         self.blocks = torch.nn.ModuleList(blocks)
 
-    def initialize_from_ann_checkpoint(self, checkpoint_path: str | Path, device: torch.device | None = None) -> "Network":
+    def initialize_from_ann_checkpoint(
+        self,
+        checkpoint_path: str | Path,
+        device: torch.device | None = None,
+        policy: str = "exact",
+    ) -> dict[str, Any]:
+        if policy not in SUPPORTED_INIT_POLICIES:
+            raise ValueError(f"Unsupported init_policy {policy!r}. Supported policies: {sorted(SUPPORTED_INIT_POLICIES)}")
+        if policy == "none":
+            return {
+                "policy": policy,
+                "checkpoint_path": str(checkpoint_path),
+                "copied_layers": [],
+                "skipped_layers": [],
+            }
+
         checkpoint = torch.load(checkpoint_path, map_location=device or "cpu")
         state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
-        weight_keys = sorted(
+        ann_weight_keys = sorted(
             [key for key in state_dict if key.startswith("net.") and key.endswith(".weight")],
             key=lambda key: int(key.split(".")[1]),
         )
+        bootstrap_weight_keys = sorted(
+            [key for key in state_dict if key.endswith("synapse.weight")],
+            key=lambda key: [int(part) if part.isdigit() else part for part in key.split(".")],
+        )
+        source_kind = "ann" if ann_weight_keys else "bootstrap"
+        weight_keys = ann_weight_keys if ann_weight_keys else bootstrap_weight_keys
         bootstrap_layers = [block for block in self.blocks if hasattr(block, "synapse")]
-        if len(weight_keys) != len(bootstrap_layers):
+        if not weight_keys:
+            raise ValueError(f"No supported weight tensors found in checkpoint: {checkpoint_path}")
+        if policy == "exact" and len(weight_keys) != len(bootstrap_layers):
             raise ValueError(
-                f"ANN has {len(weight_keys)} linear layers, bootstrap network has {len(bootstrap_layers)} weighted layers."
+                f"Checkpoint has {len(weight_keys)} weighted layers, bootstrap network has {len(bootstrap_layers)} weighted layers."
             )
 
-        for layer_index, (weight_key, bootstrap_layer) in enumerate(zip(weight_keys, bootstrap_layers)):
+        source_hidden_keys = weight_keys[:-1]
+        bootstrap_hidden_layers = bootstrap_layers[:-1]
+        layer_pairs: list[tuple[str, Any, int, str]] = [
+            (weight_key, bootstrap_layer, layer_index, "hidden")
+            for layer_index, (weight_key, bootstrap_layer) in enumerate(zip(source_hidden_keys, bootstrap_hidden_layers))
+        ]
+        layer_pairs.append((weight_keys[-1], bootstrap_layers[-1], len(bootstrap_layers) - 1, "output"))
+
+        copied_layers: list[dict[str, Any]] = []
+        for weight_key, bootstrap_layer, layer_index, layer_role in layer_pairs:
             weight = state_dict[weight_key].detach().to(
                 bootstrap_layer.synapse.weight.device,
                 dtype=bootstrap_layer.synapse.weight.dtype,
             )
-            if layer_index == 0 and self.input_strategy == "signed_split":
+            if source_kind == "ann" and layer_index == 0 and self.input_strategy == "signed_split":
                 weight = torch.cat([weight, -weight], dim=1)
-            weight = weight.reshape(weight.shape[0], weight.shape[1], 1, 1, 1)
-            if weight.shape != bootstrap_layer.synapse.weight.shape:
-                raise ValueError(f"{weight_key} has mapped shape {tuple(weight.shape)}, expected {tuple(bootstrap_layer.synapse.weight.shape)}.")
-            bootstrap_layer.synapse.weight.data.copy_(weight)
-        return self
+            if weight.ndim == 2:
+                weight = weight.reshape(weight.shape[0], weight.shape[1], 1, 1, 1)
+            target = bootstrap_layer.synapse.weight.data
+            if policy == "exact" and weight.shape != target.shape:
+                raise ValueError(f"{weight_key} has mapped shape {tuple(weight.shape)}, expected {tuple(target.shape)}.")
+            copy_shape = tuple(min(int(source_dim), int(target_dim)) for source_dim, target_dim in zip(weight.shape, target.shape))
+            tensor_slice = tuple(slice(0, dim) for dim in copy_shape)
+            target[tensor_slice].copy_(weight[tensor_slice])
+            copied_layers.append(
+                {
+                    "source_key": weight_key,
+                    "role": layer_role,
+                    "source_shape": list(weight.shape),
+                    "target_shape": list(target.shape),
+                    "copied_shape": list(copy_shape),
+                    "exact": tuple(weight.shape) == tuple(target.shape),
+                }
+            )
+
+        skipped_layers = []
+        if len(bootstrap_hidden_layers) > len(source_hidden_keys):
+            skipped_layers.extend(
+                {
+                    "role": "hidden",
+                    "target_index": index,
+                    "target_shape": list(layer.synapse.weight.shape),
+                    "reason": "no_matching_source_hidden_layer",
+                }
+                for index, layer in enumerate(bootstrap_hidden_layers[len(source_hidden_keys) :], start=len(source_hidden_keys))
+            )
+        if len(source_hidden_keys) > len(bootstrap_hidden_layers):
+            skipped_layers.extend(
+                {
+                    "role": "hidden",
+                    "source_key": key,
+                    "reason": "no_matching_bootstrap_hidden_layer",
+                }
+                for key in source_hidden_keys[len(bootstrap_hidden_layers) :]
+            )
+
+        return {
+            "policy": policy,
+            "source_kind": source_kind,
+            "checkpoint_path": str(checkpoint_path),
+            "source_weight_layers": len(weight_keys),
+            "bootstrap_weight_layers": len(bootstrap_layers),
+            "copied_layers": copied_layers,
+            "skipped_layers": skipped_layers,
+        }
 
     def encode_input(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim == 1:
@@ -369,10 +459,44 @@ def make_loaders(config: Config) -> tuple[Dataset, Dataset, Dataset, DataLoader,
     return dataset, training_set, testing_set, train_loader, val_loader, full_val_loader
 
 
+def rate_from_mode(model: Network, states: torch.Tensor, mode: bootstrap.routine.LayerMode) -> torch.Tensor:
+    output = model.forward(states, mode)
+    return torch.mean(output, dim=-1).reshape((states.shape[0], -1))
+
+
 def pure_snn_rate(model: Network, states: torch.Tensor) -> torch.Tensor:
     snn_mode = bootstrap.routine.LayerMode(0, bootstrap.Mode.SNN)
-    output = model.forward(states, snn_mode)
-    return torch.mean(output, dim=-1).reshape((states.shape[0], -1))
+    return rate_from_mode(model, states, snn_mode)
+
+
+def samplers_ready(model: Network) -> bool:
+    ready = True
+    for block in model.blocks:
+        sampler = getattr(block, "f", None)
+        if sampler is None:
+            continue
+        if getattr(sampler, "centers", None) is None:
+            ready = False
+            break
+    return ready
+
+
+def fit_available_samplers(model: Network) -> None:
+    for block in model.blocks:
+        sampler = getattr(block, "f", None)
+        if sampler is None:
+            continue
+        if len(getattr(sampler, "z", [])) == 0:
+            continue
+        block.fit()
+
+
+def warmup_samplers(model: Network, states: torch.Tensor) -> None:
+    if samplers_ready(model):
+        return
+    with torch.no_grad():
+        _ = rate_from_mode(model, states, bootstrap.routine.LayerMode(0, bootstrap.Mode.SAMPLE))
+    fit_available_samplers(model)
 
 
 def percentage_error(predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -462,6 +586,10 @@ def save_training_history(
     history_path: Path,
     config: Config,
     best_snn_val_loss: float,
+    best_epoch: int | None,
+    best_full_val_mean_pct: float | None,
+    best_full_val_median_pct: float | None,
+    init_report: dict[str, Any],
     checkpoint_path: Path,
     export_path: Path,
     plot_path: Path,
@@ -469,7 +597,12 @@ def save_training_history(
     history_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "config": dataclass_to_dict(config),
+        "init_report": init_report,
         "best_snn_val_loss": best_snn_val_loss,
+        "best_full_val_snn_mse": best_snn_val_loss,
+        "best_epoch": best_epoch,
+        "best_full_val_mean_percentage_error": best_full_val_mean_pct,
+        "best_full_val_median_percentage_error": best_full_val_median_pct,
         "checkpoint_path": str(checkpoint_path),
         "export_path": str(export_path),
         "plot_path": str(plot_path),
@@ -491,7 +624,25 @@ def train(config: Config) -> dict[str, Any]:
     dataset, training_set, testing_set, train_loader, val_loader, full_val_loader = make_loaders(config)
 
     model = Network(config.model).to(device)
-    model.initialize_from_ann_checkpoint(resolve_path(config.paths.ann_checkpoint), device=device)
+    init_report = model.initialize_from_ann_checkpoint(
+        resolve_path(config.paths.ann_checkpoint),
+        device=device,
+        policy=config.model.init_policy,
+    )
+    training_mode = config.bootstrap_training.mode
+    if training_mode not in SUPPORTED_BOOTSTRAP_TRAINING_MODES:
+        raise ValueError(
+            f"Unsupported bootstrap_training.mode {training_mode!r}. "
+            f"Supported modes: {sorted(SUPPORTED_BOOTSTRAP_TRAINING_MODES)}"
+        )
+    bootstrap_scheduler = None
+    if training_mode == "scheduler":
+        bootstrap_scheduler = bootstrap.routine.Scheduler(
+            num_sample_iter=config.bootstrap_training.num_sample_iter,
+            sample_period=config.bootstrap_training.sample_period,
+            crossover_epochs=list(config.bootstrap_training.crossover_epochs) if config.bootstrap_training.crossover_epochs else None,
+        )
+
     optimizer = torch.optim.Adam(model.parameters(), lr=config.training.learning_rate)
     lr_scheduler = None
     if config.lr_scheduler.enabled:
@@ -508,6 +659,14 @@ def train(config: Config) -> dict[str, Any]:
     print(f"device: {device}")
     print(f"dataset: {resolve_path(config.paths.dataset)}")
     print(f"ann checkpoint: {resolve_path(config.paths.ann_checkpoint)}")
+    print(f"init policy: {config.model.init_policy} copied_layers={len(init_report.get('copied_layers', []))} skipped_layers={len(init_report.get('skipped_layers', []))}")
+    print(f"bootstrap training mode: {training_mode}")
+    if bootstrap_scheduler is not None:
+        print(
+            f"bootstrap scheduler: num_sample_iter={config.bootstrap_training.num_sample_iter} "
+            f"sample_period={config.bootstrap_training.sample_period} "
+            f"crossover_epochs={config.bootstrap_training.crossover_epochs}"
+        )
     print(f"output dir: {output_dir}")
     print(f"state shape: {tuple(sample_state.shape)} action shape: {tuple(sample_action.shape)}")
     print(f"train samples: {len(training_set)} validation samples: {len(testing_set)}")
@@ -523,6 +682,9 @@ def train(config: Config) -> dict[str, Any]:
         )
 
     best_snn_val_loss = float("inf")
+    best_epoch = None
+    best_full_val_mean_pct = None
+    best_full_val_median_pct = None
     history: dict[str, list[Any]] = {
         "train_snn_loss": [],
         "val_snn_loss": [],
@@ -547,11 +709,19 @@ def train(config: Config) -> dict[str, Any]:
         train_samples = 0
         train_percentage_errors: list[torch.Tensor] = []
 
-        for states, actions in train_loader:
+        for batch_index, (states, actions) in enumerate(train_loader):
             states = states.to(device, non_blocking=pin_memory)
             actions = actions.to(device, non_blocking=pin_memory)
 
-            rate = pure_snn_rate(model, states)
+            if training_mode == "scheduler":
+                assert bootstrap_scheduler is not None
+                layer_mode = bootstrap_scheduler.mode(epoch, batch_index, train=True)
+                base_mode = getattr(layer_mode, "base_mode", layer_mode)
+                if base_mode in {bootstrap.Mode.ANN, bootstrap.Mode.FIT}:
+                    warmup_samplers(model, states)
+                rate = rate_from_mode(model, states, layer_mode)
+            else:
+                rate = pure_snn_rate(model, states)
             loss = F.mse_loss(rate, actions)
 
             optimizer.zero_grad()
@@ -563,6 +733,9 @@ def train(config: Config) -> dict[str, Any]:
             train_output_numel += rate.numel()
             train_samples += states.shape[0]
             train_percentage_errors.append(percentage_error(rate.detach(), actions).detach().cpu())
+
+        if training_mode == "scheduler":
+            fit_available_samplers(model)
 
         train_snn_loss = train_snn_loss_sum / max(1, train_samples)
         train_mean_pct, train_median_pct = summarize_percentage_error(train_percentage_errors)
@@ -593,6 +766,9 @@ def train(config: Config) -> dict[str, Any]:
             full_val_output_activity = full_val_metrics["output_abs_mean"]
             if full_val_snn_loss < best_snn_val_loss:
                 best_snn_val_loss = full_val_snn_loss
+                best_epoch = epoch + 1
+                best_full_val_mean_pct = full_val_mean_pct
+                best_full_val_median_pct = full_val_median_pct
                 torch.save(model.state_dict(), checkpoint_path)
                 checkpoint_note = " saved_best"
 
@@ -620,7 +796,19 @@ def train(config: Config) -> dict[str, Any]:
             f"lr={current_lr:.2e} output_abs_mean={output_activity:.6f}{checkpoint_note}"
         )
 
-    save_training_history(history, history_path, config, best_snn_val_loss, checkpoint_path, export_path, plot_path)
+    save_training_history(
+        history,
+        history_path,
+        config,
+        best_snn_val_loss,
+        best_epoch,
+        best_full_val_mean_pct,
+        best_full_val_median_pct,
+        init_report,
+        checkpoint_path,
+        export_path,
+        plot_path,
+    )
     print(f"Saved training history to {history_path}")
 
     if config.runtime.save_plot:
@@ -635,6 +823,11 @@ def train(config: Config) -> dict[str, Any]:
 
     return {
         "best_snn_val_loss": best_snn_val_loss,
+        "best_full_val_snn_mse": best_snn_val_loss,
+        "best_epoch": best_epoch,
+        "best_full_val_mean_percentage_error": best_full_val_mean_pct,
+        "best_full_val_median_percentage_error": best_full_val_median_pct,
+        "init_report": init_report,
         "checkpoint_path": checkpoint_path,
         "export_path": export_path,
         "plot_path": plot_path,

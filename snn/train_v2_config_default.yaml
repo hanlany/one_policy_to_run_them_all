@@ -17,6 +17,7 @@ model:
   weight_norm: false
   weight_scale: 1.0
   delay_shift: false
+  init_policy: exact
   neuron:
     threshold: 0.5
     current_decay: 0.3
@@ -45,6 +46,12 @@ lr_scheduler:
   patience: 5
   threshold: 1.0e-4
   min_lr: 1.0e-5
+
+bootstrap_training:
+  mode: pure_snn
+  num_sample_iter: 10
+  sample_period: 10
+  crossover_epochs: []
 
 runtime:
   device: auto

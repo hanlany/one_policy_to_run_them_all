@@ -35,3 +35,19 @@ Do not train or modify policy weights. Do not run broad regression suites, param
 - [ ] The manifest identifies both results and marks the combined gate passed.
 
 Successful MJCF loading or one recording alone is not completion; both recordings are the gate.
+
+## Progress / critical finding (2026-07-29 UTC)
+
+- Pinned upstream `VinRobotics/vinrobotics_mjlab` `main` at `92238af819c263abaa0f1d1e02e467bf70d6d902`; repository license is Apache-2.0. Read-only clone: `/tmp/vinrobotics_mjlab_plan04`.
+- Inspected both upstream MJCFs and constants: `vr_m3_1_12dof.xml` has a free `pelvis` plus 12 active leg hinges; `vr_m3_1.xml` has the same pelvis plus 27 active hinges (waist, legs, arms, wrists). Neither has a `trunk`; both use the shared 30-mesh `xmls/assets/` set and implicit actuator constants. Home poses are 12-DoF pelvis height `0.900` with leg pose `(-0.1, 0, 0, 0.2, -0.1, 0)` per leg; full-body pelvis height `0.854` with the same legs, shoulder rolls `(+0.15, -0.15)`, elbows `1.57`, and other upper-body joints zero.
+- Critical adapter constraint: full-body’s 27 policy-capable joints exceed the existing locomotion checkpoint’s known robot-sizing envelope unless upper-body joints are retained physically but locked at home; this controlled subset must be explicitly documented before rollout.
+- Current local evidence: no `vr_m3_1_12dof`/`vr_m3_1_full` package, registry entry, termination config, recording preset, or `dev/codex/artifacts/vr_m3_1/<RUN_ID>/` output exists. The unchanged `experiments/pre_trained_model` exists (SHA-256 `e851b6c4b2d1da55050d5ba1500cc893073795e9a4b83dad2abc6ce58e489c60`) and is an Orbax aggregate checkpoint, not a PyTorch file; compatibility and the two MP4 gate remain unverified.
+
+## Follow-up compatibility check (2026-07-29 UTC)
+
+- Restored the unchanged Orbax policy and initialized the same Flax policy in memory with 23-field per-joint descriptions, the 16-field policy general state, two feet, and 27 dynamic joints: zero parameter-shape mismatches; action output `(1, 27)`. The 27-DoF count alone does not force upper-body locking; the prior dimension-risk note is superseded, while runtime mapping and behavior remain unverified.
+- Critical integration blocker: the shared H1 adapter directly uses `xml_handle.find("body", "trunk")` and `data.body("trunk")` for the goal arrow and geometry/observation descriptions, but both upstream MJCF roots are named `pelvis` and contain no `trunk`. Root remapping/compatibility must precede environment initialization; raw MJCF parsing alone is insufficient.
+
+## Recommended blocker fix (2026-07-29 UTC)
+
+- In each locally adapted VinRobot MJCF, rename only the free root body from `pelvis` to `trunk`, preserving its free joint, pose, inertia, geoms, and child hierarchy. Map the pelvis collision geoms under the framework's logical `"trunk"` collision group and retain the upstream `pelvis` terminology in attribution/mapping documentation. This is the narrowest compatibility fix for inherited `data.body("trunk")`, goal-arrow, trunk-relative observation, termination, and body-index randomization assumptions; disable the goal arrow until its attachment is verified. Do not alter the upstream source clone or policy checkpoint.

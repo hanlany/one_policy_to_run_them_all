@@ -1,31 +1,32 @@
 paths:
   dataset: teacher_student_dagger_dataset.npz
   ann_checkpoint: student_model_latest.pth
-  output_dir: Trained_long
-  checkpoint_name: network.pt
-  export_name: network.net
-  plot_name: snn_training_curves.png
+  output_dir: experiments/snn_v2_quantrick/20260722T053851Z/final
+  checkpoint_name: quantrick_network.pt
+  export_name: quantrick_network.net
+  plot_name: quantrick_training_curves.png
+  history_name: quantrick_training_history.json
 
 model:
   input_dim: 668
   output_dim: 24
   hidden_dims: [1024, 1024, 1024, 1024, 1024]
-  time_steps: 3
+  time_steps: 20
   input_strategy: signed_split
-  input_weight: 2.0
+  input_weight: 1.0
   input_bias: 0.0
   weight_norm: false
   weight_scale: 1.0
   delay_shift: false
   init_policy: exact
   neuron:
-    threshold: 0.5
+    threshold: 0.2
     current_decay: 0.3
     voltage_decay: 0.02
     tau_grad: 1.0
     scale_grad: 1.0
   weight_quantization:
-    mode: legacy_8bit
+    mode: decomposed
     target_bits: 24
     chunk_bits: 8
     sign_mode: mixed
@@ -61,5 +62,6 @@ bootstrap_training:
 
 runtime:
   device: auto
-  export_hdf5: true
+  export_hdf5: false
   save_plot: true
+

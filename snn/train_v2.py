@@ -32,9 +32,15 @@ for path in (SNN_DIR, LAVA_SRC):
         sys.path.insert(0, str(path))
 
 import lava.lib.dl.bootstrap as bootstrap  # noqa: E402
+from lava.lib.dl.slayer.utils import (  # noqa: E402
+    DecomposedWeightQuantizer,
+    SignMode,
+)
 
 SUPPORTED_INIT_POLICIES = {"exact", "partial", "none"}
 SUPPORTED_BOOTSTRAP_TRAINING_MODES = {"pure_snn", "scheduler"}
+SUPPORTED_WEIGHT_QUANTIZATION_MODES = {"legacy_8bit", "decomposed"}
+SUPPORTED_WEIGHT_QUANTIZATION_SCOPES = {"all", "first"}
 
 
 @dataclass
@@ -58,6 +64,16 @@ class NeuronConfig:
 
 
 @dataclass
+class WeightQuantizationConfig:
+    mode: str = "legacy_8bit"
+    target_bits: int = 24
+    chunk_bits: int = 8
+    sign_mode: str = "mixed"
+    scope: str = "all"
+
+
+
+@dataclass
 class ModelConfig:
     input_dim: int = 668
     output_dim: int = 24
@@ -69,6 +85,7 @@ class ModelConfig:
     weight_norm: bool = False
     weight_scale: float = 1.0
     delay_shift: bool = False
+    weight_quantization: WeightQuantizationConfig = field(default_factory=WeightQuantizationConfig)
     init_policy: str = "exact"
     neuron: NeuronConfig = field(default_factory=NeuronConfig)
 
@@ -143,11 +160,15 @@ def dataclass_to_dict(value: Any) -> Any:
 
 def build_config(data: dict[str, Any]) -> Config:
     neuron = NeuronConfig(**data.get("model", {}).get("neuron", {}))
+    weight_quantization = WeightQuantizationConfig(
+        **data.get("model", {}).get("weight_quantization", {})
+    )
     model_data = dict(data.get("model", {}))
     model_data.pop("neuron", None)
+    model_data.pop("weight_quantization", None)
     return Config(
         paths=PathConfig(**data.get("paths", {})),
-        model=ModelConfig(**model_data, neuron=neuron),
+        model=ModelConfig(**model_data, neuron=neuron, weight_quantization=weight_quantization),
         training=TrainingConfig(**data.get("training", {})),
         lr_scheduler=LRSchedulerConfig(**data.get("lr_scheduler", {})),
         bootstrap_training=BootstrapTrainingConfig(**data.get("bootstrap_training", {})),
@@ -178,7 +199,43 @@ def load_config(path: Path, overrides: Iterable[str]) -> Config:
     if loaded:
         deep_update(defaults, loaded)
     apply_overrides(defaults, overrides)
-    return build_config(defaults)
+    config = build_config(defaults)
+    validate_config(config)
+    return config
+
+def validate_config(config: Config) -> None:
+    quantization = config.model.weight_quantization
+    if quantization.mode not in SUPPORTED_WEIGHT_QUANTIZATION_MODES:
+        raise ValueError(
+            f"Unsupported weight quantization mode {quantization.mode!r}; "
+            f"expected one of {sorted(SUPPORTED_WEIGHT_QUANTIZATION_MODES)}"
+        )
+    if quantization.scope not in SUPPORTED_WEIGHT_QUANTIZATION_SCOPES:
+        raise ValueError(
+            f"Unsupported weight quantization scope {quantization.scope!r}; "
+            f"expected one of {sorted(SUPPORTED_WEIGHT_QUANTIZATION_SCOPES)}"
+        )
+    try:
+        SignMode(quantization.sign_mode)
+    except ValueError as error:
+        raise ValueError(
+            f"Unsupported weight quantization sign mode "
+            f"{quantization.sign_mode!r}"
+        ) from error
+    if quantization.target_bits <= 0 or quantization.chunk_bits <= 0:
+        raise ValueError("Weight quantization bit widths must be positive")
+    if quantization.target_bits % quantization.chunk_bits:
+        raise ValueError(
+            "weight_quantization.target_bits must be divisible by "
+            "weight_quantization.chunk_bits"
+        )
+    if quantization.mode == "decomposed" and config.runtime.export_hdf5:
+        raise ValueError(
+            "runtime.export_hdf5=true is unsupported with decomposed "
+            "weights. Disable HDF5 export or select legacy_8bit mode."
+        )
+
+
 
 
 def resolve_path(path: str | Path) -> Path:
@@ -257,6 +314,111 @@ class Network(torch.nn.Module):
             )
         )
         self.blocks = torch.nn.ModuleList(blocks)
+        self.neuron_settings = {
+            "threshold": float(config.neuron.threshold),
+            "current_decay": float(config.neuron.current_decay),
+            "voltage_decay": float(config.neuron.voltage_decay),
+            "tau_grad": float(config.neuron.tau_grad),
+            "scale_grad": float(config.neuron.scale_grad),
+        }
+        self.input_weight = float(config.input_weight)
+        self.input_bias = float(config.input_bias)
+        self.weight_quantization = dataclass_to_dict(
+            config.weight_quantization
+        )
+        self.quantized_synapses: list[tuple[int, Any]] = []
+        weighted_blocks = [
+            block for block in self.blocks if hasattr(block, "synapse")
+        ]
+        if config.weight_quantization.mode == "decomposed":
+            selected = (
+                weighted_blocks
+                if config.weight_quantization.scope == "all"
+                else weighted_blocks[:1]
+            )
+            for layer_index, block in enumerate(weighted_blocks):
+                if block not in selected:
+                    continue
+                quantizer = DecomposedWeightQuantizer(
+                    target_bits=config.weight_quantization.target_bits,
+                    chunk_bits=config.weight_quantization.chunk_bits,
+                    sign_mode=config.weight_quantization.sign_mode,
+                    scale=64,
+                )
+                block.synapse.pre_hook_fx = quantizer
+                self.quantized_synapses.append((layer_index, block.synapse))
+
+
+
+    def quantization_diagnostics(self) -> list[dict[str, Any]]:
+        diagnostics = []
+        weighted_blocks = [
+            block for block in self.blocks if hasattr(block, "synapse")
+        ]
+        for layer_index, block in enumerate(weighted_blocks):
+            synapse = block.synapse
+            raw = synapse.weight.detach()
+            hook = synapse.pre_hook_fx
+            with torch.no_grad():
+                quantized = hook(raw) if hook is not None else raw
+            hook_diagnostics = dict(
+                getattr(hook, "last_diagnostics", {})
+            )
+            diagnostics.append({
+                "layer_index": layer_index,
+                "layer_type": type(block).__name__,
+                "selected": bool(
+                    getattr(hook, "is_decomposed_weight_quantizer", False)
+                ),
+                "raw_min": float(raw.min().item()),
+                "raw_max": float(raw.max().item()),
+                "quantized_min": float(quantized.min().item()),
+                "quantized_max": float(quantized.max().item()),
+                "raw_finite": bool(torch.isfinite(raw).all().item()),
+                "quantized_finite": bool(
+                    torch.isfinite(quantized).all().item()
+                ),
+                "reconstruction_error_count": int(
+                    hook_diagnostics.get("reconstruction_error_count", 0)
+                ),
+                "max_reconstruction_error": int(
+                    hook_diagnostics.get("max_reconstruction_error", 0)
+                ),
+                "saturation_count": int(
+                    hook_diagnostics.get("saturation_count", 0)
+                ),
+                "max_quantization_error": float(
+                    hook_diagnostics.get("max_quantization_error", 0.0)
+                ),
+            })
+        return diagnostics
+
+    def checkpoint_payload(self) -> dict[str, Any]:
+        return {
+            "state_dict": self.state_dict(),
+            "input_dim": self.input_dim,
+            "output_dim": self.output_dim,
+            "hidden_dims": list(self.hidden_dims),
+            "timesteps": self.time_steps,
+            "readout": "mean",
+            "neuron_threshold": self.neuron_settings["threshold"],
+            "current_decay": self.neuron_settings["current_decay"],
+            "voltage_decay": self.neuron_settings["voltage_decay"],
+            "neuron_settings": dict(self.neuron_settings),
+            "input_strategy": self.input_strategy,
+            "input_weight": self.input_weight,
+            "input_bias": self.input_bias,
+            "weight_quantization": dict(self.weight_quantization),
+            "architecture": {
+                "input_dim": self.input_dim,
+                "encoded_input_dim": self.encoded_input_dim,
+                "hidden_dims": list(self.hidden_dims),
+                "output_dim": self.output_dim,
+            },
+            "quantization_diagnostics": self.quantization_diagnostics(),
+            "backend": "bootstrap",
+        }
+
 
     def initialize_from_ann_checkpoint(
         self,
@@ -524,6 +686,8 @@ def evaluate_snn_metrics(model: Network, loader: DataLoader, device: torch.devic
             states = states.to(device, non_blocking=pin_memory)
             actions = actions.to(device, non_blocking=pin_memory)
             rate = pure_snn_rate(model, states)
+            if not torch.isfinite(rate).all():
+                raise FloatingPointError("Non-finite validation output")
             loss = F.mse_loss(rate, actions)
             loss_sum += loss.item() * states.shape[0]
             output_abs_sum += rate.abs().sum().item()
@@ -612,6 +776,7 @@ def save_training_history(
 
 
 def train(config: Config) -> dict[str, Any]:
+    validate_config(config)
     device = resolve_device(config.runtime)
     output_dir = resolve_path(config.paths.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -629,6 +794,9 @@ def train(config: Config) -> dict[str, Any]:
         device=device,
         policy=config.model.init_policy,
     )
+    initial_quantization_diagnostics = model.quantization_diagnostics()
+    print("[quantization:init] " + json.dumps(initial_quantization_diagnostics))
+
     training_mode = config.bootstrap_training.mode
     if training_mode not in SUPPORTED_BOOTSTRAP_TRAINING_MODES:
         raise ValueError(
@@ -699,6 +867,8 @@ def train(config: Config) -> dict[str, Any]:
         "output_activity": [],
         "val_output_activity": [],
         "full_val_output_activity": [],
+        "gradient_norm": [],
+        "quantization_diagnostics": [{"stage": "initial", "layers": initial_quantization_diagnostics}],
     }
 
     for epoch in range(config.training.epochs):
@@ -708,6 +878,9 @@ def train(config: Config) -> dict[str, Any]:
         train_output_numel = 0
         train_samples = 0
         train_percentage_errors: list[torch.Tensor] = []
+        train_gradient_norm_sum = 0.0
+        train_gradient_batches = 0
+
 
         for batch_index, (states, actions) in enumerate(train_loader):
             states = states.to(device, non_blocking=pin_memory)
@@ -722,10 +895,31 @@ def train(config: Config) -> dict[str, Any]:
                 rate = rate_from_mode(model, states, layer_mode)
             else:
                 rate = pure_snn_rate(model, states)
+            if not torch.isfinite(rate).all():
+                raise FloatingPointError(
+                    f"Non-finite model output at epoch {epoch + 1}, "
+                    f"batch {batch_index}"
+                )
             loss = F.mse_loss(rate, actions)
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"Non-finite loss at epoch {epoch + 1}, "
+                    f"batch {batch_index}"
+                )
 
             optimizer.zero_grad()
             loss.backward()
+            gradient_sq_sum = 0.0
+            for parameter in model.parameters():
+                if parameter.grad is None:
+                    continue
+                if not torch.isfinite(parameter.grad).all():
+                    raise FloatingPointError("Non-finite model gradient")
+                gradient_sq_sum += float(
+                    parameter.grad.square().sum().item()
+                )
+            train_gradient_norm_sum += gradient_sq_sum ** 0.5
+            train_gradient_batches += 1
             optimizer.step()
 
             train_snn_loss_sum += loss.detach().item() * states.shape[0]
@@ -744,6 +938,9 @@ def train(config: Config) -> dict[str, Any]:
         history["train_mean_percentage_error"].append(train_mean_pct)
         history["train_median_percentage_error"].append(train_median_pct)
         history["output_activity"].append(output_activity)
+        history["gradient_norm"].append(
+            train_gradient_norm_sum / max(1, train_gradient_batches)
+        )
 
         val_metrics = evaluate_snn_metrics(model, val_loader, device, pin_memory)
         val_snn_loss = val_metrics["mse"]
@@ -764,12 +961,40 @@ def train(config: Config) -> dict[str, Any]:
             full_val_mean_pct = full_val_metrics["mean_percentage_error"]
             full_val_median_pct = full_val_metrics["median_percentage_error"]
             full_val_output_activity = full_val_metrics["output_abs_mean"]
+            epoch_quantization_diagnostics = model.quantization_diagnostics()
+            history["quantization_diagnostics"].append({
+                "stage": "full_validation",
+                "epoch": epoch + 1,
+                "layers": epoch_quantization_diagnostics,
+            })
+            print(
+                f"[quantization:epoch={epoch + 1}] "
+                + json.dumps(epoch_quantization_diagnostics)
+            )
+            if any(
+                not layer["raw_finite"]
+                or not layer["quantized_finite"]
+                or layer["saturation_count"] != 0
+                for layer in epoch_quantization_diagnostics
+            ):
+                raise FloatingPointError(
+                    "Quantization diagnostics reported non-finite values "
+                    "or saturation"
+                )
             if full_val_snn_loss < best_snn_val_loss:
                 best_snn_val_loss = full_val_snn_loss
                 best_epoch = epoch + 1
                 best_full_val_mean_pct = full_val_mean_pct
                 best_full_val_median_pct = full_val_median_pct
-                torch.save(model.state_dict(), checkpoint_path)
+                checkpoint_payload = model.checkpoint_payload()
+                checkpoint_payload.update({
+                    "epoch": best_epoch,
+                    "best_full_val_snn_mse": best_snn_val_loss,
+                    "best_full_val_mean_percentage_error": best_full_val_mean_pct,
+                    "best_full_val_median_percentage_error": best_full_val_median_pct,
+                    "resolved_config": dataclass_to_dict(config),
+                })
+                torch.save(checkpoint_payload, checkpoint_path)
                 checkpoint_note = " saved_best"
 
         scheduler_metric = full_val_snn_loss if full_val_snn_loss is not None else val_snn_loss
@@ -796,6 +1021,27 @@ def train(config: Config) -> dict[str, Any]:
             f"lr={current_lr:.2e} output_abs_mean={output_activity:.6f}{checkpoint_note}"
         )
 
+    if checkpoint_path.exists():
+        best_checkpoint = torch.load(checkpoint_path, map_location=device)
+        best_state_dict = (
+            best_checkpoint["state_dict"]
+            if isinstance(best_checkpoint, dict)
+            and "state_dict" in best_checkpoint
+            else best_checkpoint
+        )
+        model.load_state_dict(best_state_dict)
+    final_quantization_diagnostics = model.quantization_diagnostics()
+    history["quantization_diagnostics"].append({
+        "stage": "final_best_checkpoint",
+        "epoch": best_epoch,
+        "layers": final_quantization_diagnostics,
+    })
+    print(
+        "[quantization:final] "
+        + json.dumps(final_quantization_diagnostics)
+    )
+
+
     save_training_history(
         history,
         history_path,
@@ -816,8 +1062,6 @@ def train(config: Config) -> dict[str, Any]:
         print(f"Saved training plot to {plot_path}")
 
     if config.runtime.export_hdf5:
-        if checkpoint_path.exists():
-            model.load_state_dict(torch.load(checkpoint_path, map_location=device))
         model.export_hdf5(export_path)
         print(f"Exported network to {export_path}")
 

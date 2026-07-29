@@ -64,6 +64,11 @@ def get_config(algorithm_name):
     config.bootstrap_input_strategy = "signed_split"
     config.bootstrap_input_weight = 1.0
     config.bootstrap_input_bias = 0.0
+    config.bootstrap_weight_quantization_mode = "legacy_8bit"
+    config.bootstrap_weight_quantization_target_bits = 24
+    config.bootstrap_weight_quantization_chunk_bits = 8
+    config.bootstrap_weight_quantization_sign_mode = "mixed"
+    config.bootstrap_weight_quantization_scope = "all"
     config.bootstrap_training_mode = "scheduler"
     config.bootstrap_lr_scheduler_enabled = False
     config.bootstrap_lr_scheduler_factor = 0.5

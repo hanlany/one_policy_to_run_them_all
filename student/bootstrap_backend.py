@@ -12,9 +12,12 @@ from torch.utils.data import DataLoader, Dataset, random_split
 try:
     from lava.lib.dl.bootstrap import block as lava_bootstrap_block
     from lava.lib.dl.bootstrap import routine as lava_bootstrap_routine
+    from lava.lib.dl.slayer.utils import DecomposedWeightQuantizer, SignMode
 except ImportError:
     lava_bootstrap_block = None
     lava_bootstrap_routine = None
+    DecomposedWeightQuantizer = None
+    SignMode = None
 
 TensorLike = Union[np.ndarray, torch.Tensor]
 DEFAULT_HIDDEN_DIMS = [1024, 1024, 1024, 1024, 1024]
@@ -25,6 +28,8 @@ DEFAULT_BOOTSTRAP_VOLTAGE_DECAY = 0.03
 DEFAULT_BOOTSTRAP_NUM_SAMPLE_ITER = 10
 DEFAULT_BOOTSTRAP_SAMPLE_PERIOD = 10
 SUPPORTED_BOOTSTRAP_TRAINING_MODES = ("scheduler", "pure_snn")
+SUPPORTED_WEIGHT_QUANTIZATION_MODES = ("legacy_8bit", "decomposed")
+SUPPORTED_WEIGHT_QUANTIZATION_SCOPES = ("all", "first")
 _BOOTSTRAP_DEVICE_WARNING_EMITTED = False
 
 
@@ -94,6 +99,11 @@ class BootstrapTrainingConfig:
     lr_scheduler_patience: int = 5
     lr_scheduler_threshold: float = 1e-4
     lr_scheduler_min_lr: float = 1e-5
+    weight_quantization_mode: str = "legacy_8bit"
+    weight_quantization_target_bits: int = 24
+    weight_quantization_chunk_bits: int = 8
+    weight_quantization_sign_mode: str = "mixed"
+    weight_quantization_scope: str = "all"
 
 
 @dataclass
@@ -191,6 +201,11 @@ class BootstrapStudentPolicy(nn.Module):
         input_strategy: str = "signed_split",
         input_weight: float = 1.0,
         input_bias: float = 0.0,
+        weight_quantization_mode: str = "legacy_8bit",
+        weight_quantization_target_bits: int = 24,
+        weight_quantization_chunk_bits: int = 8,
+        weight_quantization_sign_mode: str = "mixed",
+        weight_quantization_scope: str = "all",
     ):
         super().__init__()
         if lava_bootstrap_block is None or lava_bootstrap_routine is None:
@@ -211,6 +226,38 @@ class BootstrapStudentPolicy(nn.Module):
         self.input_strategy = input_strategy
         self.input_weight = float(input_weight)
         self.input_bias = float(input_bias)
+        self.weight_quantization = {
+            "mode": str(weight_quantization_mode),
+            "target_bits": int(weight_quantization_target_bits),
+            "chunk_bits": int(weight_quantization_chunk_bits),
+            "sign_mode": str(weight_quantization_sign_mode),
+            "scope": str(weight_quantization_scope),
+        }
+        if self.weight_quantization["mode"] not in SUPPORTED_WEIGHT_QUANTIZATION_MODES:
+            raise ValueError(
+                "Unsupported weight quantization mode "
+                f"{self.weight_quantization['mode']!r}"
+            )
+        if self.weight_quantization["scope"] not in SUPPORTED_WEIGHT_QUANTIZATION_SCOPES:
+            raise ValueError(
+                "Unsupported weight quantization scope "
+                f"{self.weight_quantization['scope']!r}"
+            )
+        try:
+            SignMode(self.weight_quantization["sign_mode"])
+        except ValueError as error:
+            raise ValueError(
+                "Unsupported weight quantization sign mode "
+                f"{self.weight_quantization['sign_mode']!r}"
+            ) from error
+        target_bits = self.weight_quantization["target_bits"]
+        chunk_bits = self.weight_quantization["chunk_bits"]
+        if target_bits <= 0 or chunk_bits <= 0 or target_bits % chunk_bits:
+            raise ValueError(
+                "Weight quantization bit widths must be positive and "
+                "target_bits must be divisible by chunk_bits"
+            )
+
         if self.input_strategy not in SUPPORTED_BOOTSTRAP_INPUT_STRATEGIES:
             raise ValueError(f"Unsupported bootstrap input strategy '{self.input_strategy}'. Supported strategies: {SUPPORTED_BOOTSTRAP_INPUT_STRATEGIES}")
         self.encoded_input_dim = self.input_dim * 2 if self.input_strategy == "signed_split" else self.input_dim
@@ -249,6 +296,24 @@ class BootstrapStudentPolicy(nn.Module):
             )
         )
         self.blocks = nn.ModuleList(blocks)
+        if self.weight_quantization["mode"] == "decomposed":
+            weighted_blocks = [
+                block for block in self.blocks if hasattr(block, "synapse")
+            ]
+            selected = (
+                weighted_blocks
+                if self.weight_quantization["scope"] == "all"
+                else weighted_blocks[:1]
+            )
+            for block in selected:
+                block.synapse.pre_hook_fx = DecomposedWeightQuantizer(
+                    target_bits=self.weight_quantization["target_bits"],
+                    chunk_bits=self.weight_quantization["chunk_bits"],
+                    sign_mode=self.weight_quantization["sign_mode"],
+                    scale=64,
+                )
+
+
 
     @property
     def device(self) -> torch.device:
@@ -269,6 +334,7 @@ class BootstrapStudentPolicy(nn.Module):
             "input_strategy": self.input_strategy,
             "input_weight": float(self.input_weight),
             "input_bias": float(self.input_bias),
+            "weight_quantization": dict(self.weight_quantization),
             "backend": "bootstrap",
         }
 
@@ -451,6 +517,11 @@ class BootstrapStudentTrainer:
             input_strategy=self.config.input_strategy,
             input_weight=self.config.input_weight,
             input_bias=self.config.input_bias,
+            weight_quantization_mode=self.config.weight_quantization_mode,
+            weight_quantization_target_bits=self.config.weight_quantization_target_bits,
+            weight_quantization_chunk_bits=self.config.weight_quantization_chunk_bits,
+            weight_quantization_sign_mode=self.config.weight_quantization_sign_mode,
+            weight_quantization_scope=self.config.weight_quantization_scope,
         ).to(self.device)
 
     def train(self, dataset_path: Optional[Union[str, Path]] = None, initial_model: Optional[BootstrapStudentPolicy] = None) -> TrainingArtifacts:
@@ -631,10 +702,30 @@ def load_bootstrap_policy_from_checkpoint(
     input_strategy: str = "signed_split",
     input_weight: float = 1.0,
     input_bias: float = 0.0,
+    weight_quantization_mode: str = "legacy_8bit",
+    weight_quantization_target_bits: int = 24,
+    weight_quantization_chunk_bits: int = 8,
+    weight_quantization_sign_mode: str = "mixed",
+    weight_quantization_scope: str = "all",
 ) -> tuple[BootstrapStudentPolicy, dict[str, object]]:
     checkpoint_path = Path(checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
+    explicit_weight_quantization = {
+        "mode": weight_quantization_mode,
+        "target_bits": weight_quantization_target_bits,
+        "chunk_bits": weight_quantization_chunk_bits,
+        "sign_mode": weight_quantization_sign_mode,
+        "scope": weight_quantization_scope,
+    }
+    weight_quantization = (
+        checkpoint.get(
+            "weight_quantization", explicit_weight_quantization
+        )
+        if isinstance(checkpoint, dict)
+        else explicit_weight_quantization
+    )
+
 
     input_dim = checkpoint.get("input_dim", input_dim) if isinstance(checkpoint, dict) else input_dim
     output_dim = checkpoint.get("output_dim", output_dim) if isinstance(checkpoint, dict) else output_dim
@@ -675,6 +766,11 @@ def load_bootstrap_policy_from_checkpoint(
         input_strategy=str(input_strategy),
         input_weight=float(input_weight),
         input_bias=float(input_bias),
+        weight_quantization_mode=str(weight_quantization["mode"]),
+        weight_quantization_target_bits=int(weight_quantization["target_bits"]),
+        weight_quantization_chunk_bits=int(weight_quantization["chunk_bits"]),
+        weight_quantization_sign_mode=str(weight_quantization["sign_mode"]),
+        weight_quantization_scope=str(weight_quantization["scope"]),
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -692,6 +788,7 @@ def load_bootstrap_policy_from_checkpoint(
         "input_strategy": str(input_strategy),
         "input_weight": float(input_weight),
         "input_bias": float(input_bias),
+        "weight_quantization": dict(weight_quantization),
         "backend": "bootstrap",
     }
 
@@ -859,6 +956,11 @@ class BootstrapPolicyPipeline:
             input_strategy=self.training_config.input_strategy,
             input_weight=self.training_config.input_weight,
             input_bias=self.training_config.input_bias,
+            weight_quantization_mode=self.training_config.weight_quantization_mode,
+            weight_quantization_target_bits=self.training_config.weight_quantization_target_bits,
+            weight_quantization_chunk_bits=self.training_config.weight_quantization_chunk_bits,
+            weight_quantization_sign_mode=self.training_config.weight_quantization_sign_mode,
+            weight_quantization_scope=self.training_config.weight_quantization_scope,
         ).to(self.device)
         return self.bootstrap_model
 
@@ -879,6 +981,11 @@ class BootstrapPolicyPipeline:
             input_strategy=self.training_config.input_strategy,
             input_weight=self.training_config.input_weight,
             input_bias=self.training_config.input_bias,
+            weight_quantization_mode=self.training_config.weight_quantization_mode,
+            weight_quantization_target_bits=self.training_config.weight_quantization_target_bits,
+            weight_quantization_chunk_bits=self.training_config.weight_quantization_chunk_bits,
+            weight_quantization_sign_mode=self.training_config.weight_quantization_sign_mode,
+            weight_quantization_scope=self.training_config.weight_quantization_scope,
         )
         return self.bootstrap_model
 

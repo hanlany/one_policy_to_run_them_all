@@ -24,6 +24,12 @@ model:
     voltage_decay: 0.02
     tau_grad: 1.0
     scale_grad: 1.0
+  weight_quantization:
+    mode: legacy_8bit
+    target_bits: 24
+    chunk_bits: 8
+    sign_mode: mixed
+    scope: all
 
 training:
   epochs: 100

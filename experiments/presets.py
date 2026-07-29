@@ -12,6 +12,9 @@ REQUIRED_PRESET_KEYS = ("algorithm.name", "environment.name", "runner.mode", "en
 SUPPORTED_STUDENT_BACKENDS = {"ann", "bootstrap"}
 SUPPORTED_ROLLOUT_POLICY_STAGES = {"teacher", "student", "snn"}
 SUPPORTED_READOUTS = {"mean", "last", "sum"}
+SUPPORTED_WEIGHT_QUANTIZATION_MODES = {"legacy_8bit", "decomposed"}
+SUPPORTED_WEIGHT_QUANTIZATION_SCOPES = {"all", "first"}
+
 
 
 def _resolve_value(value):
@@ -66,6 +69,39 @@ def validate_preset(name, preset):
         raise ValueError(
             f"Preset '{name}' has unsupported algorithm.bootstrap_readout '{readout}'. "
             f"Available: {sorted(SUPPORTED_READOUTS)}"
+        )
+
+    quantization_mode = preset.get(
+        "algorithm.bootstrap_weight_quantization_mode"
+    )
+    if (
+        quantization_mode is not None
+        and quantization_mode not in SUPPORTED_WEIGHT_QUANTIZATION_MODES
+    ):
+        raise ValueError(
+            f"Preset '{name}' has unsupported weight quantization mode "
+            f"{quantization_mode!r}."
+        )
+    quantization_scope = preset.get(
+        "algorithm.bootstrap_weight_quantization_scope"
+    )
+    if (
+        quantization_scope is not None
+        and quantization_scope not in SUPPORTED_WEIGHT_QUANTIZATION_SCOPES
+    ):
+        raise ValueError(
+            f"Preset '{name}' has unsupported weight quantization scope "
+            f"{quantization_scope!r}."
+        )
+    sign_mode = preset.get(
+        "algorithm.bootstrap_weight_quantization_sign_mode"
+    )
+    if sign_mode is not None and sign_mode not in {
+        "mixed", "excitatory", "inhibitory"
+    }:
+        raise ValueError(
+            f"Preset '{name}' has unsupported weight quantization sign "
+            f"mode {sign_mode!r}."
         )
 
 

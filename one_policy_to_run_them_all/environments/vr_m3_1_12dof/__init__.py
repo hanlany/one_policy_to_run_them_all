@@ -1,0 +1,8 @@
+from rl_x.environments.environment_manager import extract_environment_name_from_file, register_environment
+from one_policy_to_run_them_all.environments.vr_m3_1_12dof.create_env import create_env
+from one_policy_to_run_them_all.environments.vr_m3_1_12dof.default_config import get_config
+from one_policy_to_run_them_all.environments.vr_m3_1_12dof.general_properties import GeneralProperties
+
+
+VR_M3_1_12DOF = extract_environment_name_from_file(__file__)
+register_environment(VR_M3_1_12DOF, get_config, create_env, GeneralProperties)

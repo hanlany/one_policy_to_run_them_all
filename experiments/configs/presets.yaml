@@ -15,6 +15,8 @@ record_robots: &record_robots
   - nao_v5
   - cassie
   - hexapod
+  - vr_m3_1_12dof
+  - vr_m3_1_full
 
 base_experiment:
   algorithm.name: uni_ppo.ppo
@@ -41,6 +43,34 @@ presets:
     algorithm.rollout_policy_stage: teacher
     algorithm.record: true
     algorithm.record_robot_index: 0
+
+  record_vr_m3_1_12dof_expert:
+    environment.nr_envs: 1
+    environment.train_robot_types: [vr_m3_1_12dof]
+    environment.eval_robot_types: *record_robots
+    environment.multi_render: false
+    environment.add_goal_arrow: false
+    environment.episode_length_in_seconds: 20
+    algorithm.rollout_policy_stage: teacher
+    algorithm.record: true
+    algorithm.record_robot_index: 0
+    algorithm.record_seconds: 10
+    algorithm.record_dir: "{project_root}/dev/codex/artifacts/vr_m3_1/20260730T194945Z/videos"
+
+
+  record_vr_m3_1_full_expert:
+    environment.nr_envs: 1
+    environment.train_robot_types: [vr_m3_1_full]
+    environment.eval_robot_types: *record_robots
+    environment.multi_render: false
+    environment.add_goal_arrow: false
+    environment.episode_length_in_seconds: 20
+    algorithm.rollout_policy_stage: teacher
+    algorithm.record: true
+    algorithm.record_robot_index: 0
+    algorithm.record_seconds: 10
+    algorithm.record_dir: "{project_root}/dev/codex/artifacts/vr_m3_1/20260730T194945Z/videos"
+
 
   record_student:
     environment.nr_envs: 1

@@ -30,6 +30,8 @@ def get_config(environment_name):
     config.termination_type_go1 = "rudin2022"
     config.termination_type_go2 = "rudin2022"
     config.termination_type_h1 = "height"
+    config.termination_type_vrm3_12 = "height"
+    config.termination_type_vrm3_full = "height"
     config.termination_type_g1 = "height"
     config.termination_type_bg = "rudin2022"
     config.termination_type_bglk = "rudin2022"

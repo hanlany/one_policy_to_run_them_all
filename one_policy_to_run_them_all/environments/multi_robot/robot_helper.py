@@ -18,6 +18,8 @@ from one_policy_to_run_them_all.environments.unitree_g1.environment import Unitr
 from one_policy_to_run_them_all.environments.unitree_go1.environment import UnitreeGo1
 from one_policy_to_run_them_all.environments.unitree_go2.environment import UnitreeGo2
 from one_policy_to_run_them_all.environments.unitree_h1.environment import UnitreeH1
+from one_policy_to_run_them_all.environments.vr_m3_1_12dof.environment import VRM31_12DOF
+from one_policy_to_run_them_all.environments.vr_m3_1_full.environment import VRM31Full
 from one_policy_to_run_them_all.environments.robot_spec import RobotSpec
 
 
@@ -34,6 +36,8 @@ ROBOTS = [
     _spec(UnitreeGo1),
     _spec(UnitreeGo2),
     _spec(UnitreeH1),
+    _spec(VRM31_12DOF),
+    _spec(VRM31Full),
     _spec(UnitreeG1),
     _spec(Badger),
     _spec(BadgerLocked),
